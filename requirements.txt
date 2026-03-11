@@ -1,0 +1,17 @@
+# FastAPI & server
+fastapi
+uvicorn[standard]
+python-multipart
+
+# MongoDB
+motor
+pymongo
+
+# Supabase
+supabase
+
+# ML/AI for e-learning model training
+scikit-learn
+pandas
+numpy
+joblib
