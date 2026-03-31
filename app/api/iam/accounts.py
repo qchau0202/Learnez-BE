@@ -6,11 +6,8 @@ from pydantic import BaseModel
 
 from app.core.dependencies import require_roles
 from app.core.database import get_supabase
-from fastapi import APIRouter
-from app.api.iam.auth import router as auth_router
 
 router = APIRouter()
-router.include_router(auth_router, prefix="/iam")
 router = APIRouter(prefix="/accounts", tags=["IAM - Account Management"])
 
 # Example Pydantic models
@@ -90,7 +87,7 @@ async def list_accounts(
     role_id: Optional[int] = None,
     user=Depends(require_roles(["Admin"]))
 ):
-    supabase = get_supabase()
+    supabase = get_supabase(service_role=True)
 
     query = supabase.table("users").select("*")
 
@@ -103,7 +100,7 @@ async def list_accounts(
         {
             "id": u["user_id"],
             "email": u["email"],
-            "role": u["role_id"]
+            "role_id": u["role_id"]
         }
         for u in res.data
     ]
@@ -113,7 +110,7 @@ async def get_account(
     account_id: str,
     user=Depends(require_roles(["Admin"]))
 ):
-    supabase = get_supabase()
+    supabase = get_supabase(service_role=True)
 
     res = supabase.table("users") \
         .select("*") \
@@ -128,7 +125,7 @@ async def get_account(
     return {
         "id": u["user_id"],
         "email": u["email"],
-        "role": u["role_id"]
+        "role_id": u["role_id"]
     }
 
 @router.delete("/{account_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -136,7 +133,7 @@ async def delete_account(
     account_id: str,
     user=Depends(require_roles(["Admin"]))
 ):
-    supabase = get_supabase()
+    supabase = get_supabase(service_role=True)
 
     supabase.table("users") \
         .delete() \
