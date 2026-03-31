@@ -1,19 +1,26 @@
-"""Authentication endpoints - Login, Logout."""
+from fastapi import APIRouter
+from pydantic import BaseModel
+from app.core.database import get_supabase
 
-from fastapi import APIRouter, Depends
+router = APIRouter()
+supabase = get_supabase()
 
-from app.api.deps import DbDep
 
-router = APIRouter(prefix="/auth", tags=["IAM - Authentication"])
+class LoginRequest(BaseModel):
+    email: str
+    password: str
 
 
 @router.post("/login")
-async def login(db: DbDep):
-    """Login with email and password. Returns JWT token."""
-    ...
+def login(data: LoginRequest):
 
+    res = supabase.auth.sign_in_with_password({
+        "email": data.email,
+        "password": data.password
+    })
 
-@router.post("/logout")
-async def logout():
-    """Logout (invalidate token / clear session)."""
-    ...
+    return {
+        "access_token": res.session.access_token,
+        "refresh_token": res.session.refresh_token,
+        "user": res.user
+    }
