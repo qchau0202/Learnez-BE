@@ -1,10 +1,8 @@
-"""IAM module router."""
-
 from fastapi import APIRouter
+from app.api.iam.auth import router as auth_router
+from app.api.iam.accounts import router as accounts_router
 
-from app.api.iam import auth, accounts
+router = APIRouter()
 
-router = APIRouter(tags=["IAM"])
-
-router.include_router(auth.router)
-router.include_router(accounts.router)
+router.include_router(auth_router, prefix="/iam")
+router.include_router(accounts_router, prefix="/iam")
