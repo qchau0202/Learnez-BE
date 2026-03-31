@@ -2,6 +2,7 @@
 
 from motor.motor_asyncio import AsyncIOMotorClient
 from supabase import create_client, Client
+import os
 
 from app.core.config import get_settings
 
@@ -22,3 +23,10 @@ def get_supabase_client() -> Client | None:
     if settings["supabase_url"] and settings["supabase_anon_key"]:
         return create_client(settings["supabase_url"], settings["supabase_anon_key"])
     return None
+
+
+def get_supabase(service_role: bool = False):
+    settings = get_settings()
+    if service_role and settings["supabase_service_key"]:
+        return create_client(settings["supabase_url"], settings["supabase_service_key"])
+    return get_supabase_client()
