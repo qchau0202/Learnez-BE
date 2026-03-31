@@ -15,3 +15,6 @@ api_router.include_router(course_router)
 api_router.include_router(assessment_router)
 api_router.include_router(activity_router)
 api_router.include_router(storage_router)
+
+# Backward-compatible export for main.py
+router = api_router
