@@ -1,1 +1,1 @@
-"""MongoDB document models and Pydantic schemas for API."""
+"""Pydantic models for IAM, profiles, and RBAC tables."""
