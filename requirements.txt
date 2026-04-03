@@ -15,3 +15,6 @@ scikit-learn
 pandas
 numpy
 joblib
+
+# Caching
+redis
