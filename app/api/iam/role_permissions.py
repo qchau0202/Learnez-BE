@@ -12,19 +12,25 @@ router = APIRouter(prefix="/rbac", tags=["IAM - Role Permissions"])
 
 # Permission names are code-like for stable frontend mapping.
 PERMISSION_CATALOG = [
-    {"permission_id": 1, "permission_name": "course-01", "description": "Edit course information"},
-    {"permission_id": 2, "permission_name": "module-01", "description": "Create course modules"},
-    {"permission_id": 3, "permission_name": "module-02", "description": "Read course modules"},
-    {"permission_id": 4, "permission_name": "module-03", "description": "Update course modules"},
-    {"permission_id": 5, "permission_name": "module-04", "description": "Delete course modules"},
-    {"permission_id": 6, "permission_name": "material-01", "description": "Create module materials"},
-    {"permission_id": 7, "permission_name": "material-02", "description": "Read module materials"},
-    {"permission_id": 8, "permission_name": "material-03", "description": "Update module materials"},
-    {"permission_id": 9, "permission_name": "material-04", "description": "Delete module materials"},
-    {"permission_id": 10, "permission_name": "assignment-01", "description": "Create assignments"},
-    {"permission_id": 11, "permission_name": "assignment-02", "description": "Read assignments"},
-    {"permission_id": 12, "permission_name": "assignment-03", "description": "Update assignments"},
-    {"permission_id": 13, "permission_name": "assignment-04", "description": "Delete assignments"},
+    {"permission_id": 1, "permission_name": "course-01", "description": "Create course"},
+    {"permission_id": 2, "permission_name": "course-02", "description": "View course"},
+    {"permission_id": 3, "permission_name": "course-03", "description": "Update course"},
+    {"permission_id": 4, "permission_name": "course-04", "description": "Delete course"},
+
+    {"permission_id": 5, "permission_name": "module-01", "description": "Create course modules"},
+    {"permission_id": 6, "permission_name": "module-02", "description": "View course modules"},
+    {"permission_id": 7, "permission_name": "module-03", "description": "Update course modules"},
+    {"permission_id": 8, "permission_name": "module-04", "description": "Delete course modules"},
+
+    {"permission_id": 9, "permission_name": "material-01", "description": "Create module materials"},
+    {"permission_id": 10, "permission_name": "material-02", "description": "View module materials"},
+    {"permission_id": 11, "permission_name": "material-03", "description": "Update module materials"},
+    {"permission_id": 12, "permission_name": "material-04", "description": "Delete module materials"},
+
+    {"permission_id": 13, "permission_name": "assignment-01", "description": "Create assignments"},
+    {"permission_id": 14, "permission_name": "assignment-02", "description": "View assignments"},
+    {"permission_id": 15, "permission_name": "assignment-03", "description": "Update assignments"},
+    {"permission_id": 16, "permission_name": "assignment-04", "description": "Delete assignments"},
 ]
 
 ADMIN_FULL_PERMISSION_IDS = [p["permission_id"] for p in PERMISSION_CATALOG]
