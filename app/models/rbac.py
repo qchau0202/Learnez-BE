@@ -26,3 +26,11 @@ class RolePermission(BaseModel):
 class UserRoleAssignment(BaseModel):
     user_id: str
     role_id: int
+
+
+class UserPermissionOverride(BaseModel):
+    user_id: str
+    permission_id: int
+    is_allowed: bool
+    changed_by: str
+    created_at: Optional[datetime] = None
