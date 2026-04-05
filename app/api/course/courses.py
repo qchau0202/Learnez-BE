@@ -6,7 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from app.core.database import get_supabase
 from app.core.dependencies import ROLE_MAP, require_roles
-from app.models.course import CourseCreate, CourseOut, CourseUpdate
+from app.models.course import CourseCreate, CourseOut, CourseUpdate, ModuleCreate, ModuleOut
+from app.services.assignment_cascade import delete_assignment_cascade
 
 router = APIRouter(prefix="/courses", tags=["Course & Content - Courses"])
 
@@ -60,6 +61,7 @@ async def create_course(
         "description": payload.description or "",
         "course_code": payload.course_code,
         "semester": payload.semester,
+        "academic_year": payload.academic_year,
         "lecturer_id": payload.lecturer_id,
         "schedule": payload.schedule.isoformat() if payload.schedule else None,
         "is_complete": payload.is_complete,
@@ -154,4 +156,82 @@ async def delete_course(
     if not res.data:
         raise HTTPException(status_code=404, detail="Course not found")
     sb.table("courses").delete().eq("id", course_id).execute()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/{course_id}/modules",
+    response_model=ModuleOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_module(
+    course_id: int,
+    payload: ModuleCreate,
+    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer"])),
+):
+    sb = _sb()
+    res = sb.table("courses").select("*").eq("id", course_id).limit(1).execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Course not found")
+    row = res.data[0]
+    if not _can_edit_course(user, row):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    ins = (
+        sb.table("modules")
+        .insert(
+            {
+                "course_id": course_id,
+                "title": payload.title,
+                "description": payload.description or "",
+            }
+        )
+        .execute()
+    )
+    if not ins.data:
+        raise HTTPException(status_code=500, detail="Failed to create module")
+    return ins.data[0]
+
+
+@router.get("/{course_id}/modules", response_model=List[ModuleOut])
+async def list_course_modules(
+    course_id: int,
+    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer", "Student"])),
+):
+    sb = _sb()
+    res = sb.table("courses").select("*").eq("id", course_id).limit(1).execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Course not found")
+    row = res.data[0]
+    if not _can_view_course(user, row):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    mods = sb.table("modules").select("*").eq("course_id", course_id).order("id").execute()
+    return mods.data or []
+
+
+@router.delete(
+    "/{course_id}/modules/{module_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_module(
+    course_id: int,
+    module_id: int,
+    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer"])),
+):
+    sb = _sb()
+    crs = sb.table("courses").select("*").eq("id", course_id).limit(1).execute()
+    if not crs.data:
+        raise HTTPException(status_code=404, detail="Course not found")
+    if not _can_edit_course(user, crs.data[0]):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    mod = sb.table("modules").select("*").eq("id", module_id).limit(1).execute()
+    if not mod.data or mod.data[0].get("course_id") != course_id:
+        raise HTTPException(status_code=404, detail="Module not found")
+
+    asgs = sb.table("assignments").select("id").eq("module_id", module_id).execute()
+    for row in asgs.data or []:
+        delete_assignment_cascade(sb, row["id"])
+
+    sb.table("module_materials").delete().eq("module_id", module_id).execute()
+    sb.table("modules").delete().eq("id", module_id).execute()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
