@@ -11,6 +11,7 @@ class CourseBase(BaseModel):
     description: str = Field(default="", max_length=2000)
     course_code: Optional[str] = None
     semester: Optional[str] = None
+    academic_year: Optional[str] = None
     lecturer_id: Optional[str] = None
     schedule: Optional[datetime] = None
     is_complete: bool = False
@@ -29,6 +30,7 @@ class CourseUpdate(BaseModel):
     description: Optional[str] = None
     course_code: Optional[str] = None
     semester: Optional[str] = None
+    academic_year: Optional[str] = None
     lecturer_id: Optional[str] = None
     schedule: Optional[datetime] = None
     is_complete: Optional[bool] = None
@@ -41,6 +43,7 @@ class CourseOut(BaseModel):
     created_at: datetime
     title: str
     description: str
+    academic_year: Optional[str] = None
     lecturer_id: Optional[str] = None
     schedule: Optional[datetime] = None
     is_complete: Optional[bool] = False
@@ -58,28 +61,14 @@ class ModuleBase(BaseModel):
     course_id: Optional[int] = None
 
 
+class ModuleCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=500)
+    description: str = Field(default="", max_length=2000)
+
+
 class ModuleOut(ModuleBase):
     id: int
     created_at: datetime
-
-    class Config:
-        from_attributes = True
-
-
-class AssignmentBase(BaseModel):
-    module_id: Optional[int] = None
-    title: Optional[str] = None
-    description: Optional[str] = None
-    due_date: Optional[datetime] = None
-    total_score: Optional[float] = None
-
-
-class AssignmentOut(AssignmentBase):
-    id: int
-    created_at: datetime
-    uploaded_by: Optional[int] = None
-    achieved_score: Optional[float] = None
-    is_complete: Optional[bool] = False
 
     class Config:
         from_attributes = True
