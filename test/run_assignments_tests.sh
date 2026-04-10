@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
-# Run assignment E2E from BE/ (scripts live in BE/test/).
-# Usage (from repo root that contains BE/, e.g. Source):
-#   bash BE/test/run_assignments_tests.sh                 # scenarios only; keeps E2E course in DB
-#   bash BE/test/run_assignments_tests.sh test            # same
-#   bash BE/test/run_assignments_tests.sh cleanup         # only delete E2E-ASGN-SCENARIOS (no scenarios)
-#   bash BE/test/run_assignments_tests.sh teardown        # scenarios then delete course/module
-# Flags can follow the mode or be used without a mode if they start with -:
-#   bash BE/test/run_assignments_tests.sh test --skip-start-cleanup
+# Assignment API test runner (explicit create/cleanup split).
+#
+# Usage (from repo root, e.g. Source):
+#   bash BE/test/run_assignments_tests.sh create
+#   bash BE/test/run_assignments_tests.sh cleanup
+#   bash BE/test/run_assignments_tests.sh create_and_cleanup
+#
+# Optional passthrough flags:
+#   bash BE/test/run_assignments_tests.sh create --start-cleanup
+#   bash BE/test/run_assignments_tests.sh create --teardown-after
+#
+# Legacy aliases kept for compatibility:
+#   test -> create, teardown -> create_and_cleanup
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PY="${ROOT}/venv/bin/python"
@@ -16,10 +21,10 @@ if [[ ! -x "$PY" ]]; then
 fi
 export API_BASE="${API_BASE:-http://127.0.0.1:8000}"
 
-mode=test
+mode=create
 if [[ $# -ge 1 && "$1" != -* ]]; then
   case "$1" in
-    test|cleanup|teardown)
+    create|cleanup|create_and_cleanup|test|teardown)
       mode=$1
       shift
       ;;
@@ -27,17 +32,17 @@ if [[ $# -ge 1 && "$1" != -* ]]; then
 fi
 
 case "$mode" in
-  test)
+  create|test)
     exec "$PY" "${ROOT}/test/test_assignments_crud.py" "$@"
     ;;
   cleanup)
     exec "$PY" "${ROOT}/test/test_assignments_crud.py" --cleanup-only "$@"
     ;;
-  teardown)
+  create_and_cleanup|teardown)
     exec "$PY" "${ROOT}/test/test_assignments_crud.py" --teardown-after "$@"
     ;;
   *)
-    echo "Usage: $0 [test|cleanup|teardown] [python args...]" >&2
+    echo "Usage: $0 [create|cleanup|create_and_cleanup] [python args...]" >&2
     exit 1
     ;;
 esac
