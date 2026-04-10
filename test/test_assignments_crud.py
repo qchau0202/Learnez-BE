@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """End-to-end assignment scenarios: MCQ-only, Essay-only, mixed.
 
-By default the test keeps the E2E course/module in the DB for inspection.
+By default the test keeps the E2E course/module in the DB for inspection and
+does not perform any cleanup.
 Tear down is separate: see --cleanup-only and --teardown-after.
 
 Expects API at API_BASE (default http://127.0.0.1:8000).
@@ -11,8 +12,9 @@ Env:
   LECTURER_EMAIL / LECTURER_PASSWORD — default lecturer1@email.com / 123456
   STUDENT_EMAIL / STUDENT_PASSWORD — optional; if unset, uses first role_id=3 account
 
-Course code E2E-ASGN-SCENARIOS: stale rows are removed at the start of a normal run
-unless you pass --skip-start-cleanup.
+Course code E2E-ASGN-SCENARIOS:
+  - Default run does not delete anything before scenarios.
+  - Use --start-cleanup if you explicitly want pre-run cleanup.
 
 Run scenarios (default): BE/venv/bin/python BE/test/test_assignments_crud.py
 Remove E2E data only:  BE/venv/bin/python BE/test/test_assignments_crud.py --cleanup-only
@@ -208,9 +210,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="Only delete E2E-ASGN-SCENARIOS data (no scenarios). Not counted as the test.",
     )
     p.add_argument(
-        "--skip-start-cleanup",
+        "--start-cleanup",
         action="store_true",
-        help="Do not remove existing E2E course before scenarios (duplicate course_code may fail).",
+        help="Before scenarios, remove existing E2E data. Off by default for strict create/cleanup separation.",
     )
     p.add_argument(
         "--teardown-after",
@@ -235,11 +237,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     ah = auth_json(admin_t)
-    if not args.skip_start_cleanup:
+    if args.start_cleanup:
         print("=== Remove stale E2E course (if any) before scenarios ===")
         cleanup_e2e_course(admin_t)
-    else:
-        print("=== Skipping start cleanup (--skip-start-cleanup) ===")
 
     acc = requests.get(f"{BASE}/api/iam/accounts/", headers=auth_bearer(admin_t), timeout=30)
     if acc.status_code != 200:

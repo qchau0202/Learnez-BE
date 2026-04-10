@@ -81,3 +81,15 @@ class CourseEnrollmentOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class MaterialOut(BaseModel):
+    id: int
+    module_id: Optional[int] = None
+    created_at: datetime
+    material_type: Optional[str] = None
+    file_url: Optional[str] = None
+    uploaded_by: Optional[str] = None
+
+    class Config:
+        from_attributes = True
