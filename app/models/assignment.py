@@ -89,6 +89,23 @@ class SubmissionUpdate(BaseModel):
     status: Optional[Literal["draft", "submitted"]] = None
 
 
+class GradeAnswerIn(BaseModel):
+    question_id: int
+    earned_score: float
+    is_correct: Optional[bool] = None
+    ai_feedback: Optional[str] = None
+
+
+class SubmissionGradeIn(BaseModel):
+    answer_grades: List[GradeAnswerIn] = Field(default_factory=list)
+    feedback: Optional[str] = None
+    finalize: bool = True
+
+
+class SubmissionFeedbackIn(BaseModel):
+    feedback: str = Field(min_length=1, max_length=5000)
+
+
 class SubmissionAnswerOut(BaseModel):
     id: int
     created_at: datetime
