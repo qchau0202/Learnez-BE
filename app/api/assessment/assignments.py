@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from app.core.database import get_supabase
 from app.core.dependencies import ROLE_MAP, require_roles
 from app.services.assignment_cascade import delete_assignment_cascade
+from app.services.assessment.grading_service import auto_grade_submission
 from app.models.assignment import (
     AnswerIn,
     AssignmentCreate,
@@ -105,6 +106,23 @@ def _can_manage_assignment(user: dict[str, Any], sb, row: dict) -> bool:
 def _question_ids_for_assignment(sb, assignment_id: int) -> set[int]:
     q = sb.table("assignment_questions").select("id").eq("assignment_id", assignment_id).execute()
     return {r["id"] for r in (q.data or [])}
+
+
+def _reset_submission_grading(sb, submission_id: int):
+    sb.table("assignment_submission_answers").update(
+        {
+            "is_correct": None,
+            "earned_score": None,
+            "ai_feedback": None,
+        }
+    ).eq("submission_id", submission_id).execute()
+    sb.table("assignment_submissions").update(
+        {
+            "is_corrected": False,
+            "final_score": None,
+            "feedback": None,
+        }
+    ).eq("id", submission_id).execute()
 
 
 def _replace_submission_answers(
@@ -447,13 +465,8 @@ async def create_or_resubmit(
             raise HTTPException(status_code=403, detail="Forbidden")
         sb.table("assignment_submissions").update({"status": payload.status}).eq("id", sub["id"]).execute()
         _replace_submission_answers(sb, sub["id"], payload.answers, qids)
-        sub2 = (
-            sb.table("assignment_submissions")
-            .select("*")
-            .eq("id", sub["id"])
-            .limit(1)
-            .execute()
-        ).data[0]
+        _reset_submission_grading(sb, sub["id"])
+        sub2 = auto_grade_submission(sb, arow, sub["id"])
         return _submission_to_out(sb, sub2, True)
 
     ins = (
@@ -479,7 +492,7 @@ async def create_or_resubmit(
     except Exception:
         sb.table("assignment_submissions").delete().eq("id", sid).execute()
         raise
-    sub3 = sb.table("assignment_submissions").select("*").eq("id", sid).limit(1).execute().data[0]
+    sub3 = auto_grade_submission(sb, arow, sid)
     return _submission_to_out(sb, sub3, True)
 
 
@@ -580,7 +593,10 @@ async def update_submission(
         qids = _question_ids_for_assignment(sb, assignment_id)
         answer_models = [AnswerIn(**a) if isinstance(a, dict) else a for a in answers]
         _replace_submission_answers(sb, submission_id, answer_models, qids)
-    s2 = sb.table("assignment_submissions").select("*").eq("id", submission_id).limit(1).execute().data[0]
+        _reset_submission_grading(sb, submission_id)
+    s2 = auto_grade_submission(sb, arow, submission_id) if answers is not None else (
+        sb.table("assignment_submissions").select("*").eq("id", submission_id).limit(1).execute().data[0]
+    )
     return _submission_to_out(sb, s2, True)
 
 
