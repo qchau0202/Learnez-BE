@@ -1,8 +1,23 @@
 #!/usr/bin/env python3
-"""E2E grading flow: MCQ auto-grade and essay manual grading."""
+"""E2E grading flow: MCQ auto-grade, mixed partial auto-grade, manual essay grading.
+
+Default run keeps data for inspection (no teardown).
+Cleanup is separate: --cleanup-only, optional --start-cleanup before run, --teardown-after.
+
+Expects API at API_BASE (default http://127.0.0.1:8000).
+
+Course code: E2E-GRADING-FLOW
+
+Run:
+  BE/venv/bin/python BE/test/test_grading_flow.py
+  BE/venv/bin/python BE/test/test_grading_flow.py --start-cleanup   # fresh run if duplicate code exists
+  BE/venv/bin/python BE/test/test_grading_flow.py --cleanup-only
+  BE/venv/bin/python BE/test/test_grading_flow.py --teardown-after
+"""
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -95,11 +110,13 @@ def cleanup_course(admin_token: str) -> None:
         )
         if enrollments.status_code == 200:
             for row in enrollments.json():
-                requests.delete(
-                    f"{BASE}/api/enrollment/{cid}/students/{row['student_id']}",
-                    headers=headers,
-                    timeout=30,
-                )
+                sid = row.get("student_id")
+                if sid:
+                    requests.delete(
+                        f"{BASE}/api/enrollment/{cid}/students/{sid}",
+                        headers=headers,
+                        timeout=30,
+                    )
         requests.delete(f"{BASE}/api/courses/{cid}", headers=headers, timeout=30)
 
 
@@ -142,10 +159,44 @@ def get_submission(headers: dict, assignment_id: int, submission_id: int) -> dic
     return res.json()
 
 
-def main() -> int:
+def parse_args(argv: list[str] | None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Grading flow E2E or cleanup only.")
+    p.add_argument(
+        "--cleanup-only",
+        action="store_true",
+        help="Only delete E2E-GRADING-FLOW data (no scenarios).",
+    )
+    p.add_argument(
+        "--start-cleanup",
+        action="store_true",
+        help="Before scenarios, remove existing E2E course (use if course_code already exists).",
+    )
+    p.add_argument(
+        "--teardown-after",
+        action="store_true",
+        help="After success, delete module, enrollments, and course.",
+    )
+    return p.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+
     try:
         admin_token = login(ADMIN_EMAIL, ADMIN_PASSWORD)
+    except Exception as exc:
+        return fail(str(exc))
+
+    if args.cleanup_only:
+        print("=== Cleanup only (E2E-GRADING-FLOW) — not running scenarios ===")
         cleanup_course(admin_token)
+        return 0
+
+    if args.start_cleanup:
+        print("=== Pre-run cleanup (E2E-GRADING-FLOW) ===")
+        cleanup_course(admin_token)
+
+    try:
         accounts = list_accounts(admin_token)
     except Exception as exc:
         return fail(str(exc))
@@ -187,7 +238,10 @@ def main() -> int:
         timeout=30,
     )
     if course_res.status_code != 201:
-        return fail(f"create course failed: {course_res.status_code} {course_res.text}")
+        return fail(
+            f"create course failed: {course_res.status_code} {course_res.text}\n"
+            "Hint: pass --start-cleanup if E2E-GRADING-FLOW already exists."
+        )
     course_id = course_res.json()["id"]
 
     module_res = requests.post(
@@ -314,12 +368,20 @@ def main() -> int:
         return fail(f"essay score mismatch: {essay_answer}")
 
     print("Grading flow passed.")
+    if args.teardown_after:
+        print("=== Teardown (--teardown-after) ===")
+        cleanup_course(admin_token)
+    else:
+        print(
+            f"Data kept for inspection (course_id={course_id}, module_id={module_id}). "
+            "Remove with: BE/venv/bin/python BE/test/test_grading_flow.py --cleanup-only"
+        )
     return 0
 
 
 if __name__ == "__main__":
     try:
-        sys.exit(main())
+        sys.exit(main(sys.argv[1:]))
     except requests.RequestException as exc:
         print(exc, file=sys.stderr)
         sys.exit(1)

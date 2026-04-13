@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.core.dependencies import require_roles
 from app.models.assignment import SubmissionFeedbackIn, SubmissionGradeIn, SubmissionOut
 from app.services.assessment.grading_service import apply_manual_grades
+from app.services.notifications.scenario_notifications import notify_grades_released
 from app.api.assessment.assignments import (
     _can_manage_assignment,
     _get_assignment,
@@ -48,6 +49,14 @@ async def grade_submission(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if payload.finalize and updated.get("is_corrected"):
+        notify_grades_released(
+            sb,
+            student_id=submission["student_id"],
+            assignment_row=assignment,
+            submission_id=updated["id"],
+            final_score=updated.get("final_score"),
+        )
     return _submission_to_out(sb, updated, True)
 
 

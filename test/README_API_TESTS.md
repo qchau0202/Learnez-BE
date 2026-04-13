@@ -26,7 +26,23 @@ bash BE/test/run_api_tests.sh assignments_cleanup
 bash BE/test/run_api_tests.sh assignments_create_and_cleanup
 ```
 
-### 2) Courses API
+### 2) Grading flow (MCQ auto + manual essay)
+
+Uses course code `E2E-GRADING-FLOW` and `/api/grading/...` endpoints.
+
+```bash
+# Run flow only (keeps data). If course_code already exists, add --start-cleanup:
+bash BE/test/run_api_tests.sh grading_create
+bash BE/test/run_api_tests.sh grading_create --start-cleanup
+
+# Cleanup only (no test run)
+bash BE/test/run_api_tests.sh grading_cleanup
+
+# Run flow then delete E2E course/module
+bash BE/test/run_api_tests.sh grading_create_and_cleanup
+```
+
+### 3) Courses API
 
 ```bash
 # CRUD create/list/get/update flow (keeps created course)
@@ -39,7 +55,7 @@ bash BE/test/run_api_tests.sh courses_seed_create
 bash BE/test/run_api_tests.sh courses_delete_all
 ```
 
-### 3) Module Materials API
+### 4) Module Materials API
 
 ```bash
 # Upload/update/delete scenario run (keeps E2E course/module by default)
@@ -62,6 +78,8 @@ You can also call domain runners directly:
 ```bash
 bash BE/test/run_assignments_tests.sh create
 bash BE/test/run_assignments_tests.sh cleanup
+bash BE/test/run_assignments_tests.sh grading
+bash BE/test/run_assignments_tests.sh grading_cleanup
 bash BE/test/run_courses_tests.sh materials_cleanup
 ```
 

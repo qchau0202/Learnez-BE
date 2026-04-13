@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, Upl
 from app.core.database import get_supabase
 from app.core.dependencies import ROLE_MAP, require_roles
 from app.models.course import MaterialOut
+from app.services.notifications.scenario_notifications import notify_material_uploaded
 
 router = APIRouter(prefix="/content", tags=["Course & Content - Content"])
 
@@ -156,7 +157,15 @@ async def upload_content(
         except Exception:
             pass
         raise HTTPException(status_code=500, detail="Failed to create material record")
-    return ins.data[0]
+    mat = ins.data[0]
+    notify_material_uploaded(
+        sb,
+        module_id=module_id,
+        course_id=course["id"],
+        material_id=mat["id"],
+        material_label=filename,
+    )
+    return mat
 
 
 @router.put("/materials/{material_id}", response_model=MaterialOut)

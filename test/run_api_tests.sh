@@ -10,7 +10,15 @@
 #   bash BE/test/run_api_tests.sh materials_create
 #   bash BE/test/run_api_tests.sh materials_cleanup
 #   bash BE/test/run_api_tests.sh materials_create_and_cleanup
+#   bash BE/test/run_api_tests.sh grading_create
+#   bash BE/test/run_api_tests.sh grading_cleanup
+#   bash BE/test/run_api_tests.sh grading_create_and_cleanup
 #   bash BE/test/run_api_tests.sh courses_delete_all
+#   bash BE/test/run_api_tests.sh notifications_create
+#   bash BE/test/run_api_tests.sh notifications_cleanup
+#   bash BE/test/run_api_tests.sh notifications_create_and_cleanup
+#   bash BE/test/run_api_tests.sh notifications_create_keep   # leaves rows in Supabase
+#   bash BE/test/run_api_tests.sh notifications_all_scenarios   # all scenario triggers, no cleanup
 #
 set -euo pipefail
 
@@ -31,6 +39,15 @@ case "$action" in
   assignments_create_and_cleanup)
     exec bash "${ROOT}/test/run_assignments_tests.sh" create_and_cleanup "$@"
     ;;
+  grading_create)
+    exec bash "${ROOT}/test/run_assignments_tests.sh" grading "$@"
+    ;;
+  grading_cleanup)
+    exec bash "${ROOT}/test/run_assignments_tests.sh" grading_cleanup "$@"
+    ;;
+  grading_create_and_cleanup)
+    exec bash "${ROOT}/test/run_assignments_tests.sh" grading_teardown "$@"
+    ;;
   courses_create)
     exec bash "${ROOT}/test/run_courses_tests.sh" courses_create "$@"
     ;;
@@ -49,6 +66,21 @@ case "$action" in
   courses_delete_all)
     exec bash "${ROOT}/test/run_courses_tests.sh" courses_delete_all "$@"
     ;;
+  notifications_create)
+    exec "${ROOT}/venv/bin/python" "${ROOT}/test/test_notifications_flow.py" "$@"
+    ;;
+  notifications_cleanup)
+    exec "${ROOT}/venv/bin/python" "${ROOT}/test/test_notifications_flow.py" --cleanup-only "$@"
+    ;;
+  notifications_create_and_cleanup)
+    exec "${ROOT}/venv/bin/python" "${ROOT}/test/test_notifications_flow.py" --start-cleanup --teardown-after "$@"
+    ;;
+  notifications_create_keep)
+    exec "${ROOT}/venv/bin/python" "${ROOT}/test/test_notifications_flow.py" --keep-data "$@"
+    ;;
+  notifications_all_scenarios)
+    exec "${ROOT}/venv/bin/python" "${ROOT}/test/test_notification_scenarios_e2e.py" "$@"
+    ;;
   help|--help|-h)
     cat <<'EOF'
 Usage:
@@ -58,12 +90,20 @@ Actions:
   assignments_create
   assignments_cleanup
   assignments_create_and_cleanup
+  grading_create
+  grading_cleanup
+  grading_create_and_cleanup
   courses_create
   courses_seed_create
   materials_create
   materials_cleanup
   materials_create_and_cleanup
   courses_delete_all
+  notifications_create
+  notifications_cleanup
+  notifications_create_and_cleanup
+  notifications_create_keep
+  notifications_all_scenarios
 EOF
     ;;
   *)
