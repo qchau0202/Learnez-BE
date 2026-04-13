@@ -190,18 +190,29 @@ def notify_assignment_published(sb, assignment_row: dict) -> None:
         c = _course_row(sb, cid)
         ctitle = c.get("title") if c else ""
         path = public_path(f"/courses/{cid}/assignments")
+        hard = assignment_row.get("hard_due_date")
+        hard_note = (
+            f" Final submission cutoff: {hard}."
+            if hard
+            else " You may submit after the due date until a hard deadline is set."
+        )
         for sid in students:
             insert_notification(
                 sb,
                 recipient_id=sid,
                 title=f"New assignment: {title}",
-                body=f"{ctitle}: {title} is available. Due: {assignment_row.get('due_date') or 'TBA'}. Open: {path}",
+                body=(
+                    f"{ctitle}: {title} is available. Due: {assignment_row.get('due_date') or 'TBA'}.{hard_note} "
+                    f"Open: {path}"
+                ),
                 notification_type="course",
                 course_id=cid,
                 scenario=ASSIGNMENT_PUBLISHED,
                 metadata={
                     "assignment_id": aid,
                     "course_id": cid,
+                    "due_date": str(assignment_row.get("due_date")) if assignment_row.get("due_date") else None,
+                    "hard_due_date": str(hard) if hard else None,
                     "action_path": f"/courses/{cid}/assignments",
                 },
             )
@@ -215,6 +226,8 @@ def notify_assignment_due_date_changed(
     assignment_row: dict,
     old_due: Any,
     new_due: Any,
+    old_hard: Any = None,
+    new_hard: Any = None,
 ) -> None:
     def _():
         cid = assignment_course_id(sb, assignment_row)
@@ -224,12 +237,18 @@ def notify_assignment_due_date_changed(
         title = assignment_row.get("title") or "Assignment"
         students = enrolled_student_ids(sb, cid)
         path = public_path(f"/courses/{cid}/assignments")
+        lines = []
+        if str(old_due or "") != str(new_due or ""):
+            lines.append(f"Due date: {old_due} → {new_due}")
+        if str(old_hard or "") != str(new_hard or ""):
+            lines.append(f"Hard deadline (submission closes): {old_hard} → {new_hard}")
+        body = "; ".join(lines) + f". Open: {path}"
         for sid in students:
             insert_notification(
                 sb,
                 recipient_id=sid,
-                title=f"Due date updated: {title}",
-                body=f"The due date changed from {old_due} to {new_due}. Open: {path}",
+                title=f"Assignment schedule updated: {title}",
+                body=body,
                 notification_type="reminder",
                 course_id=cid,
                 scenario=ASSIGNMENT_DUE_DATE_CHANGED,
@@ -238,6 +257,8 @@ def notify_assignment_due_date_changed(
                     "course_id": cid,
                     "old_due_date": str(old_due) if old_due is not None else None,
                     "new_due_date": str(new_due) if new_due is not None else None,
+                    "old_hard_due_date": str(old_hard) if old_hard is not None else None,
+                    "new_hard_due_date": str(new_hard) if new_hard is not None else None,
                     "action_path": f"/courses/{cid}/assignments",
                 },
             )

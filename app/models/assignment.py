@@ -37,7 +37,14 @@ class AssignmentCreate(BaseModel):
     module_id: int
     title: str = Field(min_length=1, max_length=500)
     description: Optional[str] = Field(default=None, max_length=5000)
-    due_date: Optional[datetime] = None
+    due_date: Optional[datetime] = Field(
+        None,
+        description="Soft deadline (overdue reminders). Late submission allowed after this unless hard_due_date applies.",
+    )
+    hard_due_date: Optional[datetime] = Field(
+        None,
+        description="If set, final student submission cutoff. Must be on or after due_date when both are set.",
+    )
     total_score: Optional[float] = None
     is_graded: bool = False
     questions: Optional[List[QuestionCreate]] = None
@@ -48,6 +55,7 @@ class AssignmentUpdate(BaseModel):
     title: Optional[str] = Field(None, min_length=1, max_length=500)
     description: Optional[str] = Field(None, max_length=5000)
     due_date: Optional[datetime] = None
+    hard_due_date: Optional[datetime] = None
     total_score: Optional[float] = None
     is_graded: Optional[bool] = None
 
@@ -58,6 +66,7 @@ class AssignmentOut(BaseModel):
     created_at: datetime
     description: Optional[str] = None
     due_date: Optional[datetime] = None
+    hard_due_date: Optional[datetime] = None
     total_score: Optional[float] = None
     title: Optional[str] = None
     is_graded: Optional[bool] = None

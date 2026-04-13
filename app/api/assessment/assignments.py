@@ -7,6 +7,7 @@ separate UNIQUE constraints on each column alone.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, List
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -21,6 +22,7 @@ from app.services.notifications.scenario_notifications import (
     notify_grades_released,
     notify_partial_grading_pending,
     notify_submission_received,
+    parse_iso_datetime,
 )
 from app.models.assignment import (
     AnswerIn,
@@ -37,6 +39,34 @@ from app.models.assignment import (
 )
 
 router = APIRouter(prefix="/assignments", tags=["Learning - Assignments"])
+
+
+def _validate_due_and_hard_datetimes(due_raw: Any, hard_raw: Any) -> None:
+    """hard_due_date must not be before due_date when both are set."""
+    d = parse_iso_datetime(due_raw) if due_raw is not None else None
+    h = parse_iso_datetime(hard_raw) if hard_raw is not None else None
+    if d and h and h < d:
+        raise HTTPException(
+            status_code=400,
+            detail="hard_due_date must be on or after due_date (soft deadline).",
+        )
+
+
+def _assert_student_within_hard_deadline(user: dict[str, Any], assignment_row: dict) -> None:
+    """Students cannot submit after hard_due_date; admins bypass."""
+    if ROLE_MAP.get(user.get("role_id")) != "Student":
+        return
+    raw = assignment_row.get("hard_due_date")
+    if not raw:
+        return
+    end = parse_iso_datetime(raw)
+    if end is None:
+        return
+    if datetime.now(timezone.utc) > end:
+        raise HTTPException(
+            status_code=400,
+            detail="The hard deadline for this assignment has passed; submissions are closed.",
+        )
 
 
 def _sb():
@@ -259,11 +289,14 @@ async def create_assignment(
     if not _get_module(sb, payload.module_id):
         raise HTTPException(status_code=404, detail="Module not found")
 
+    _validate_due_and_hard_datetimes(payload.due_date, payload.hard_due_date)
+
     row = {
         "module_id": payload.module_id,
         "title": payload.title,
         "description": payload.description,
         "due_date": payload.due_date.isoformat() if payload.due_date else None,
+        "hard_due_date": payload.hard_due_date.isoformat() if payload.hard_due_date else None,
         "total_score": payload.total_score,
         "is_graded": payload.is_graded,
         "uploaded_by": user["user_id"],
@@ -344,6 +377,7 @@ async def update_assignment(
         raise HTTPException(status_code=403, detail="Forbidden")
 
     old_due = row.get("due_date")
+    old_hard = row.get("hard_due_date")
     data = payload.model_dump(exclude_unset=True)
     if "module_id" in data and data["module_id"] is not None:
         if ROLE_MAP.get(user["role_id"]) == "Lecturer":
@@ -353,6 +387,16 @@ async def update_assignment(
             raise HTTPException(status_code=404, detail="Module not found")
     if "due_date" in data and data["due_date"] is not None:
         data["due_date"] = data["due_date"].isoformat()
+    if "hard_due_date" in data:
+        if data["hard_due_date"] is not None:
+            data["hard_due_date"] = data["hard_due_date"].isoformat()
+        else:
+            data["hard_due_date"] = None
+
+    due_val = data["due_date"] if "due_date" in data else row.get("due_date")
+    hard_val = data["hard_due_date"] if "hard_due_date" in data else row.get("hard_due_date")
+    _validate_due_and_hard_datetimes(due_val, hard_val)
+
     if not data:
         return row
 
@@ -360,12 +404,16 @@ async def update_assignment(
     if not updated.data:
         raise HTTPException(status_code=500, detail="Failed to update assignment")
     new_row = updated.data[0]
-    if "due_date" in data and str(old_due or "") != str(new_row.get("due_date") or ""):
+    due_changed = "due_date" in data and str(old_due or "") != str(new_row.get("due_date") or "")
+    hard_changed = "hard_due_date" in data and str(old_hard or "") != str(new_row.get("hard_due_date") or "")
+    if due_changed or hard_changed:
         notify_assignment_due_date_changed(
             sb,
             assignment_row=new_row,
             old_due=old_due,
             new_due=new_row.get("due_date"),
+            old_hard=old_hard,
+            new_hard=new_row.get("hard_due_date"),
         )
     return new_row
 
@@ -489,6 +537,8 @@ async def create_or_resubmit(
     if ROLE_MAP.get(user["role_id"]) == "Student":
         if not _student_enrolled_for_assignment(sb, student_id, arow):
             raise HTTPException(status_code=403, detail="You are not enrolled in this course")
+
+    _assert_student_within_hard_deadline(user, arow)
 
     qids = _question_ids_for_assignment(sb, assignment_id)
     existing = (
@@ -632,6 +682,10 @@ async def update_submission(
 
     data = payload.model_dump(exclude_unset=True)
     answers = data.pop("answers", None)
+    if ROLE_MAP.get(user["role_id"]) == "Student":
+        trivial = not answers and (not data or data == {"status": "draft"})
+        if not trivial:
+            _assert_student_within_hard_deadline(user, arow)
     if data:
         sb.table("assignment_submissions").update(data).eq("id", submission_id).execute()
     if answers is not None:
