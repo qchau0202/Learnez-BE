@@ -3,9 +3,11 @@
 #
 # Usage (from repo root, e.g. Source):
 #   bash BE/test/run_assignments_tests.sh create
-#   bash BE/test/run_assignments_tests.sh grading
 #   bash BE/test/run_assignments_tests.sh cleanup
 #   bash BE/test/run_assignments_tests.sh create_and_cleanup
+#   bash BE/test/run_assignments_tests.sh grading
+#   bash BE/test/run_assignments_tests.sh grading_cleanup
+#   bash BE/test/run_assignments_tests.sh grading_teardown
 #
 # Optional passthrough flags:
 #   bash BE/test/run_assignments_tests.sh create --start-cleanup
@@ -25,7 +27,7 @@ export API_BASE="${API_BASE:-http://127.0.0.1:8000}"
 mode=create
 if [[ $# -ge 1 && "$1" != -* ]]; then
   case "$1" in
-    create|grading|cleanup|create_and_cleanup|test|teardown)
+    create|cleanup|create_and_cleanup|grading|grading_cleanup|grading_teardown|test|teardown)
       mode=$1
       shift
       ;;
@@ -36,17 +38,23 @@ case "$mode" in
   create|test)
     exec "$PY" "${ROOT}/test/test_assignments_crud.py" "$@"
     ;;
-  grading)
-    exec "$PY" "${ROOT}/test/test_grading_flow.py" "$@"
-    ;;
   cleanup)
     exec "$PY" "${ROOT}/test/test_assignments_crud.py" --cleanup-only "$@"
     ;;
   create_and_cleanup|teardown)
     exec "$PY" "${ROOT}/test/test_assignments_crud.py" --teardown-after "$@"
     ;;
+  grading)
+    exec "$PY" "${ROOT}/test/test_grading_flow.py" "$@"
+    ;;
+  grading_cleanup)
+    exec "$PY" "${ROOT}/test/test_grading_flow.py" --cleanup-only "$@"
+    ;;
+  grading_teardown)
+    exec "$PY" "${ROOT}/test/test_grading_flow.py" --teardown-after "$@"
+    ;;
   *)
-    echo "Usage: $0 [create|grading|cleanup|create_and_cleanup] [python args...]" >&2
+    echo "Usage: $0 [create|cleanup|create_and_cleanup|grading|grading_cleanup|grading_teardown] [python args...]" >&2
     exit 1
     ;;
 esac

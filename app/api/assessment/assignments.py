@@ -15,6 +15,13 @@ from app.core.database import get_supabase
 from app.core.dependencies import ROLE_MAP, require_roles
 from app.services.assignment_cascade import delete_assignment_cascade
 from app.services.assessment.grading_service import auto_grade_submission
+from app.services.notifications.scenario_notifications import (
+    notify_assignment_due_date_changed,
+    notify_assignment_published,
+    notify_grades_released,
+    notify_partial_grading_pending,
+    notify_submission_received,
+)
 from app.models.assignment import (
     AnswerIn,
     AssignmentCreate,
@@ -192,6 +199,31 @@ def _resolve_submit_student_id(user: dict[str, Any], payload: SubmissionCreate) 
     raise HTTPException(status_code=403, detail="Only Student or Admin may submit")
 
 
+def _after_submit_notifications(sb, assignment_row: dict, student_id: str, sub_row: dict) -> None:
+    sid = sub_row["id"]
+    notify_submission_received(
+        sb,
+        student_id=student_id,
+        assignment_row=assignment_row,
+        submission_id=sid,
+    )
+    if sub_row.get("is_corrected"):
+        notify_grades_released(
+            sb,
+            student_id=student_id,
+            assignment_row=assignment_row,
+            submission_id=sid,
+            final_score=sub_row.get("final_score"),
+        )
+    else:
+        notify_partial_grading_pending(
+            sb,
+            student_id=student_id,
+            assignment_row=assignment_row,
+            submission_id=sid,
+        )
+
+
 def _student_enrolled_for_assignment(sb, student_id: str, assignment_row: dict) -> bool:
     mod = _get_module(sb, assignment_row.get("module_id"))
     if not mod or not mod.get("course_id"):
@@ -250,7 +282,9 @@ async def create_assignment(
                 qb["order_index"] = i
             sb.table("assignment_questions").insert(qb).execute()
 
-    return created.data[0]
+    out = created.data[0]
+    notify_assignment_published(sb, out)
+    return out
 
 
 @router.get("/", response_model=List[AssignmentOut])
@@ -309,6 +343,7 @@ async def update_assignment(
     if not _can_manage_assignment(user, sb, row):
         raise HTTPException(status_code=403, detail="Forbidden")
 
+    old_due = row.get("due_date")
     data = payload.model_dump(exclude_unset=True)
     if "module_id" in data and data["module_id"] is not None:
         if ROLE_MAP.get(user["role_id"]) == "Lecturer":
@@ -324,7 +359,15 @@ async def update_assignment(
     updated = sb.table("assignments").update(data).eq("id", assignment_id).execute()
     if not updated.data:
         raise HTTPException(status_code=500, detail="Failed to update assignment")
-    return updated.data[0]
+    new_row = updated.data[0]
+    if "due_date" in data and str(old_due or "") != str(new_row.get("due_date") or ""):
+        notify_assignment_due_date_changed(
+            sb,
+            assignment_row=new_row,
+            old_due=old_due,
+            new_due=new_row.get("due_date"),
+        )
+    return new_row
 
 
 @router.delete("/{assignment_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -467,6 +510,7 @@ async def create_or_resubmit(
         _replace_submission_answers(sb, sub["id"], payload.answers, qids)
         _reset_submission_grading(sb, sub["id"])
         sub2 = auto_grade_submission(sb, arow, sub["id"])
+        _after_submit_notifications(sb, arow, student_id, sub2)
         return _submission_to_out(sb, sub2, True)
 
     ins = (
@@ -493,6 +537,7 @@ async def create_or_resubmit(
         sb.table("assignment_submissions").delete().eq("id", sid).execute()
         raise
     sub3 = auto_grade_submission(sb, arow, sid)
+    _after_submit_notifications(sb, arow, student_id, sub3)
     return _submission_to_out(sb, sub3, True)
 
 
@@ -594,9 +639,11 @@ async def update_submission(
         answer_models = [AnswerIn(**a) if isinstance(a, dict) else a for a in answers]
         _replace_submission_answers(sb, submission_id, answer_models, qids)
         _reset_submission_grading(sb, submission_id)
-    s2 = auto_grade_submission(sb, arow, submission_id) if answers is not None else (
-        sb.table("assignment_submissions").select("*").eq("id", submission_id).limit(1).execute().data[0]
-    )
+    if answers is not None:
+        s2 = auto_grade_submission(sb, arow, submission_id)
+        _after_submit_notifications(sb, arow, s2.get("student_id") or srow["student_id"], s2)
+    else:
+        s2 = sb.table("assignment_submissions").select("*").eq("id", submission_id).limit(1).execute().data[0]
     return _submission_to_out(sb, s2, True)
 
 

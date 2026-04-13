@@ -7,6 +7,10 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from app.core.database import get_supabase
 from app.core.dependencies import ROLE_MAP, require_roles
 from app.models.course import CourseEnrollmentOut
+from app.services.notifications.scenario_notifications import (
+    notify_enrollment_added,
+    notify_enrollment_removed,
+)
 
 router = APIRouter(prefix="/enrollment", tags=["Course & Content - Enrollment"])
 
@@ -63,6 +67,7 @@ async def add_student(
     )
     if not ins.data:
         raise HTTPException(status_code=500, detail="Failed to enroll student")
+    notify_enrollment_added(sb, student_id=student_id, course_id=course_id)
     return ins.data[0]
 
 
@@ -79,6 +84,7 @@ async def remove_student(
     if not _can_edit_course(user, crs.data[0]):
         raise HTTPException(status_code=403, detail="Forbidden")
     sb.table("course_enrollments").delete().eq("course_id", course_id).eq("student_id", student_id).execute()
+    notify_enrollment_removed(sb, student_id=student_id, course_id=course_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
