@@ -6,6 +6,7 @@ python-multipart
 # MongoDB
 motor
 pymongo
+certifi
 
 # Supabase
 supabase

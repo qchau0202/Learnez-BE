@@ -1,15 +1,23 @@
 """MongoDB and Supabase database connections."""
 
-from motor.motor_asyncio import AsyncIOMotorClient
-from supabase import create_client, Client
 import os
 
+from motor.motor_asyncio import AsyncIOMotorClient
+from supabase import Client, create_client
+
 from app.core.config import get_settings
+
+try:
+    import certifi
+
+    _MONGO_TLS = {"tlsCAFile": certifi.where()}
+except ImportError:
+    _MONGO_TLS = {}
 
 
 def get_mongo_client() -> AsyncIOMotorClient:
     settings = get_settings()
-    return AsyncIOMotorClient(settings["mongodb_uri"])
+    return AsyncIOMotorClient(settings["mongodb_uri"], **_MONGO_TLS)
 
 
 def get_mongo_db():
