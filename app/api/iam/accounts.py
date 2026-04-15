@@ -2,20 +2,29 @@
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from typing import List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.dependencies import require_roles
 from app.core.database import get_supabase
 
-router = APIRouter()
 router = APIRouter(prefix="/accounts", tags=["IAM - Account Management"])
 
 # Example Pydantic models
 
 class AccountCreate(BaseModel):
     email: str
-    password: str
-    role_id: int  # should be int to match DB
+    password: str = Field(min_length=6)
+    role_id: int = Field(description="1=Admin, 2=Lecturer, 3=Student")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "email": "student1@email.com",
+                "password": "123456",
+                "role_id": 3,
+            }
+        }
+    }
 
 
 class AccountOut(BaseModel):
@@ -24,7 +33,7 @@ class AccountOut(BaseModel):
     role_id: int
 
 
-@router.post("/", response_model=AccountOut, status_code=status.HTTP_201_CREATED)
+@router.post("/", response_model=AccountOut, status_code=status.HTTP_201_CREATED, summary="Create account")
 async def create_account(
     account: AccountCreate,
     request: Request,
@@ -81,7 +90,7 @@ async def create_account(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/", response_model=List[AccountOut])
+@router.get("/", response_model=List[AccountOut], summary="List accounts")
 async def list_accounts(
     request: Request,
     role_id: Optional[int] = None,
@@ -105,7 +114,7 @@ async def list_accounts(
         for u in res.data
     ]
 
-@router.get("/{account_id}", response_model=AccountOut)
+@router.get("/{account_id}", response_model=AccountOut, summary="Get account by user_id")
 async def get_account(
     account_id: str,
     user=Depends(require_roles(["Admin"]))
@@ -128,7 +137,7 @@ async def get_account(
         "role_id": u["role_id"]
     }
 
-@router.delete("/{account_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{account_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete account")
 async def delete_account(
     account_id: str,
     user=Depends(require_roles(["Admin"]))

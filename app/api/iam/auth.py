@@ -1,20 +1,24 @@
 from fastapi import APIRouter
 from fastapi import HTTPException
 from fastapi import Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from app.core.database import get_supabase
 from supabase_auth.errors import AuthApiError
 
-router = APIRouter()
+router = APIRouter(tags=["IAM - Authentication"])
 supabase = get_supabase()
 
 
 class LoginRequest(BaseModel):
     email: str
-    password: str
+    password: str = Field(min_length=1)
+
+    model_config = {
+        "json_schema_extra": {"example": {"email": "learnez@email.com", "password": "123456"}}
+    }
 
 
-@router.post("/login")
+@router.post("/login", summary="Login with email/password")
 def login(data: LoginRequest):
     try:
         res = supabase.auth.sign_in_with_password({
@@ -49,7 +53,7 @@ def login(data: LoginRequest):
     }
 
 
-@router.post("/bootstrap-admin")
+@router.post("/bootstrap-admin", summary="Bootstrap first admin profile")
 def bootstrap_admin(request: Request):
     auth_header = request.headers.get("Authorization")
     if not auth_header:
