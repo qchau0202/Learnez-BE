@@ -19,3 +19,6 @@ joblib
 
 # Caching
 redis
+
+# Media/file storage
+cloudinary

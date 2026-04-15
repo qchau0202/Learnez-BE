@@ -11,10 +11,15 @@ from app.core.database import get_supabase
 from app.core.dependencies import ROLE_MAP, require_roles
 from app.models.course import MaterialOut
 from app.services.notifications.scenario_notifications import notify_material_uploaded
+from app.services.storage.cloudinary_service import (
+    cloudinary_enabled,
+    delete_public_id,
+    public_id_from_url,
+    upload_bytes,
+)
 
 router = APIRouter(prefix="/content", tags=["Course & Content - Content"])
 
-BUCKET_NAME = "module-materials"
 DEFAULT_MAX_MB = 10
 ABSOLUTE_MAX_MB = 50
 
@@ -30,22 +35,15 @@ def _safe_filename(name: str) -> str:
     return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in (name or "file.bin"))
 
 
-def _extract_storage_path(file_url: str | None) -> str | None:
-    if not file_url:
-        return None
-    marker = f"/{BUCKET_NAME}/"
-    if marker in file_url:
-        return file_url.split(marker, 1)[1]
-    return None
-
-
-def _public_url_for(sb, path: str) -> str:
-    raw = sb.storage.from_(BUCKET_NAME).get_public_url(path)
-    if isinstance(raw, str):
-        return raw
-    if isinstance(raw, dict):
-        return raw.get("publicURL") or raw.get("public_url") or ""
-    return str(raw)
+def _require_cloudinary():
+    if not cloudinary_enabled():
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Cloudinary is not configured. Set CLOUDINARY_CLOUD_NAME, "
+                "CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET."
+            ),
+        )
 
 
 def _get_module_and_course(sb, module_id: int) -> tuple[dict, dict]:
@@ -121,6 +119,7 @@ async def upload_content(
     user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer"])),
 ):
     """Upload material file to bucket, then record metadata row."""
+    _require_cloudinary()
     sb = _sb()
     _module, course = _get_module_and_course(sb, module_id)
     if not _can_manage_module(user, course):
@@ -129,18 +128,22 @@ async def upload_content(
     file_bytes = await file.read()
     _ensure_size_limit(max_size_mb, file_bytes)
     filename = _safe_filename(file.filename or "file.bin")
-    path = f"course_{course['id']}/module_{module_id}/{uuid4().hex}_{filename}"
+    folder = f"learnez/courses/{course['id']}/modules/{module_id}"
+    unique_name = f"{uuid4().hex}_{filename}"
 
     try:
-        sb.storage.from_(BUCKET_NAME).upload(
-            path,
+        uploaded = upload_bytes(
             file_bytes,
-            {"content-type": file.content_type or "application/octet-stream"},
+            folder=folder,
+            filename=unique_name,
+            content_type=file.content_type,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Storage upload failed: {e}") from e
 
-    public_url = _public_url_for(sb, path)
+    public_url = uploaded.get("secure_url") or uploaded.get("url")
+    if not public_url:
+        raise HTTPException(status_code=500, detail="Cloudinary upload did not return public URL")
     ins = (
         sb.table("module_materials")
         .insert(
@@ -148,6 +151,15 @@ async def upload_content(
                 "module_id": module_id,
                 "material_type": material_type,
                 "file_url": public_url,
+                "storage_provider": "cloudinary",
+                "cloudinary_public_id": uploaded.get("public_id"),
+                "mime_type": file.content_type,
+                "size_bytes": int(uploaded.get("bytes") or len(file_bytes)),
+                "metadata": {
+                    "resource_type": uploaded.get("resource_type"),
+                    "format": uploaded.get("format"),
+                    "bytes": uploaded.get("bytes"),
+                },
                 "uploaded_by": user["user_id"],
             }
         )
@@ -155,7 +167,9 @@ async def upload_content(
     )
     if not ins.data:
         try:
-            sb.storage.from_(BUCKET_NAME).remove([path])
+            public_id = uploaded.get("public_id")
+            if public_id:
+                delete_public_id(public_id)
         except Exception:
             pass
         raise HTTPException(status_code=500, detail="Failed to create material record")
@@ -179,6 +193,7 @@ async def update_material(
     user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer"])),
 ):
     """Edit material type and/or replace file object."""
+    _require_cloudinary()
     sb = _sb()
     mat = sb.table("module_materials").select("*").eq("id", material_id).limit(1).execute()
     if not mat.data:
@@ -193,22 +208,38 @@ async def update_material(
     if material_type is not None:
         data["material_type"] = material_type
 
-    old_path = _extract_storage_path(row.get("file_url"))
+    old_public_id = row.get("cloudinary_public_id") or public_id_from_url(row.get("file_url"))
     new_path = None
+    new_public_id = None
     if file is not None:
         file_bytes = await file.read()
         _ensure_size_limit(max_size_mb, file_bytes)
         filename = _safe_filename(file.filename or "file.bin")
-        new_path = f"course_{course['id']}/module_{module_id}/{uuid4().hex}_{filename}"
+        folder = f"learnez/courses/{course['id']}/modules/{module_id}"
+        unique_name = f"{uuid4().hex}_{filename}"
         try:
-            sb.storage.from_(BUCKET_NAME).upload(
-                new_path,
+            uploaded = upload_bytes(
                 file_bytes,
-                {"content-type": file.content_type or "application/octet-stream"},
+                folder=folder,
+                filename=unique_name,
+                content_type=file.content_type,
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Storage upload failed: {e}") from e
-        data["file_url"] = _public_url_for(sb, new_path)
+        data["file_url"] = uploaded.get("secure_url") or uploaded.get("url")
+        if not data["file_url"]:
+            raise HTTPException(status_code=500, detail="Cloudinary upload did not return public URL")
+        new_public_id = uploaded.get("public_id")
+        new_path = data["file_url"]
+        data["storage_provider"] = "cloudinary"
+        data["cloudinary_public_id"] = new_public_id
+        data["mime_type"] = file.content_type
+        data["size_bytes"] = int(uploaded.get("bytes") or len(file_bytes))
+        data["metadata"] = {
+            "resource_type": uploaded.get("resource_type"),
+            "format": uploaded.get("format"),
+            "bytes": uploaded.get("bytes"),
+        }
         data["uploaded_by"] = user["user_id"]
 
     if not data:
@@ -216,16 +247,16 @@ async def update_material(
 
     upd = sb.table("module_materials").update(data).eq("id", material_id).execute()
     if not upd.data:
-        if new_path:
+        if new_public_id:
             try:
-                sb.storage.from_(BUCKET_NAME).remove([new_path])
+                delete_public_id(new_public_id)
             except Exception:
                 pass
         raise HTTPException(status_code=500, detail="Failed to update material")
 
-    if new_path and old_path:
+    if new_path and old_public_id:
         try:
-            sb.storage.from_(BUCKET_NAME).remove([old_path])
+            delete_public_id(old_public_id)
         except Exception:
             pass
 
@@ -237,6 +268,7 @@ async def delete_material(
     material_id: int,
     user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer"])),
 ):
+    _require_cloudinary()
     sb = _sb()
     mat = sb.table("module_materials").select("*").eq("id", material_id).limit(1).execute()
     if not mat.data:
@@ -247,11 +279,11 @@ async def delete_material(
     if not _can_manage_module(user, course):
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    old_path = _extract_storage_path(row.get("file_url"))
+    old_public_id = row.get("cloudinary_public_id") or public_id_from_url(row.get("file_url"))
     sb.table("module_materials").delete().eq("id", material_id).execute()
-    if old_path:
+    if old_public_id:
         try:
-            sb.storage.from_(BUCKET_NAME).remove([old_path])
+            delete_public_id(old_public_id)
         except Exception:
             pass
     return Response(status_code=status.HTTP_204_NO_CONTENT)
