@@ -45,6 +45,20 @@ class NotificationCreate(BaseModel):
     )
     metadata: Optional[dict[str, Any]] = None
 
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "recipient_id": "97b31ee5-75c2-4cf1-a8c2-6ae3f2bff2c2",
+                "title": "Assignment Reminder",
+                "body": "Your assignment is due soon. Check /courses/42/assignments.",
+                "notification_type": "reminder",
+                "course_id": 42,
+                "scenario": "course_announcement",
+                "metadata": {"source": "manual"},
+            }
+        }
+    }
+
 
 class NotificationUpdate(BaseModel):
     title: Optional[str] = Field(None, min_length=1, max_length=500)
@@ -57,9 +71,15 @@ class NotificationUpdate(BaseModel):
     scenario: Optional[str] = None
     metadata: Optional[dict[str, Any]] = None
 
+    model_config = {
+        "json_schema_extra": {"example": {"title": "Updated title", "is_read": True, "is_pinned": True}}
+    }
+
 
 class NotificationIdsIn(BaseModel):
     ids: List[int] = Field(min_length=1, max_length=200)
+
+    model_config = {"json_schema_extra": {"example": {"ids": [1, 2, 3]}}}
 
 
 class NotificationRecipientUpdate(BaseModel):
@@ -69,8 +89,20 @@ class NotificationRecipientUpdate(BaseModel):
     read_at: Optional[datetime] = None
     is_pinned: Optional[bool] = None
 
+    model_config = {"json_schema_extra": {"example": {"is_read": True, "is_pinned": False}}}
+
 
 class DemoLowAttendanceIn(BaseModel):
     student_id: str
     course_id: int
     note: Optional[str] = Field(None, max_length=5000)
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "student_id": "97b31ee5-75c2-4cf1-a8c2-6ae3f2bff2c2",
+                "course_id": 42,
+                "note": "Attendance dropped this week. Please contact your lecturer.",
+            }
+        }
+    }

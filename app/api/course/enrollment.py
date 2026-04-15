@@ -36,6 +36,7 @@ def _can_edit_course(user: dict[str, Any], course_row: dict) -> bool:
     "/{course_id}/students/{student_id}",
     response_model=CourseEnrollmentOut,
     status_code=status.HTTP_201_CREATED,
+    summary="Enroll student to course",
 )
 async def add_student(
     course_id: int,
@@ -71,7 +72,7 @@ async def add_student(
     return ins.data[0]
 
 
-@router.delete("/{course_id}/students/{student_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{course_id}/students/{student_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Unenroll student from course")
 async def remove_student(
     course_id: int,
     student_id: str,
@@ -88,7 +89,7 @@ async def remove_student(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.get("/{course_id}/students", response_model=List[CourseEnrollmentOut])
+@router.get("/{course_id}/students", response_model=List[CourseEnrollmentOut], summary="List enrolled students")
 async def list_enrolled_students(
     course_id: int,
     user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer"])),

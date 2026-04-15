@@ -49,6 +49,32 @@ class AssignmentCreate(BaseModel):
     is_graded: bool = False
     questions: Optional[List[QuestionCreate]] = None
 
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "module_id": 101,
+                "title": "Quiz 1 - Basics",
+                "description": "MCQ + essay introduction quiz.",
+                "due_date": "2026-06-30T23:59:00+00:00",
+                "hard_due_date": "2026-07-02T23:59:00+00:00",
+                "total_score": 10.0,
+                "is_graded": True,
+                "questions": [
+                    {
+                        "type": "mcq",
+                        "content": "Choose the correct option.",
+                        "order_index": 0,
+                        "metadata": {
+                            "options": [{"id": "A", "text": "Wrong"}, {"id": "B", "text": "Right"}],
+                            "correct_option_ids": ["B"],
+                            "allow_multiple": False,
+                        },
+                    }
+                ],
+            }
+        }
+    }
+
 
 class AssignmentUpdate(BaseModel):
     module_id: Optional[int] = None
@@ -58,6 +84,16 @@ class AssignmentUpdate(BaseModel):
     hard_due_date: Optional[datetime] = None
     total_score: Optional[float] = None
     is_graded: Optional[bool] = None
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "title": "Quiz 1 - Basics (updated)",
+                "due_date": "2026-07-01T23:59:00+00:00",
+                "hard_due_date": "2026-07-03T23:59:00+00:00",
+            }
+        }
+    }
 
 
 class AssignmentOut(BaseModel):
@@ -92,10 +128,31 @@ class SubmissionCreate(BaseModel):
     answers: List[AnswerIn] = Field(default_factory=list)
     status: Literal["draft", "submitted"] = "submitted"
 
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "answers": [
+                    {"question_id": 7001, "answer_content": "{\"selected\": [\"B\"]}"},
+                    {"question_id": 7002, "answer_content": "Essay response content."},
+                ],
+                "status": "submitted",
+            }
+        }
+    }
+
 
 class SubmissionUpdate(BaseModel):
     answers: Optional[List[AnswerIn]] = None
     status: Optional[Literal["draft", "submitted"]] = None
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "answers": [{"question_id": 7002, "answer_content": "Updated essay answer."}],
+                "status": "submitted",
+            }
+        }
+    }
 
 
 class GradeAnswerIn(BaseModel):
@@ -109,6 +166,23 @@ class SubmissionGradeIn(BaseModel):
     answer_grades: List[GradeAnswerIn] = Field(default_factory=list)
     feedback: Optional[str] = None
     finalize: bool = True
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "answer_grades": [
+                    {
+                        "question_id": 7002,
+                        "earned_score": 4.5,
+                        "is_correct": True,
+                        "ai_feedback": "Good structure and clear explanation.",
+                    }
+                ],
+                "feedback": "Overall good performance.",
+                "finalize": True,
+            }
+        }
+    }
 
 
 class SubmissionFeedbackIn(BaseModel):

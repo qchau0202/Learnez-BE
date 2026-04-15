@@ -51,14 +51,20 @@ class RoleOut(BaseModel):
 class SaveRolePermissionsRequest(BaseModel):
     permission_ids: List[int]
 
+    model_config = {"json_schema_extra": {"example": {"permission_ids": [1, 2, 5, 9, 13]}}}
+
 
 class AssignUserRoleRequest(BaseModel):
     role_id: int
+
+    model_config = {"json_schema_extra": {"example": {"role_id": 2}}}
 
 
 class AssignUserRoleByEmailRequest(BaseModel):
     email: str
     role_id: int
+
+    model_config = {"json_schema_extra": {"example": {"email": "student1@email.com", "role_id": 3}}}
 
 
 class UserPermissionOverrideItem(BaseModel):
@@ -68,6 +74,12 @@ class UserPermissionOverrideItem(BaseModel):
 
 class SaveUserPermissionOverridesRequest(BaseModel):
     overrides: List[UserPermissionOverrideItem]
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {"overrides": [{"permission_id": 14, "is_allowed": True}, {"permission_id": 16, "is_allowed": False}]}
+        }
+    }
 
 
 @router.get("/roles", response_model=List[RoleOut])

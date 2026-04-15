@@ -50,7 +50,7 @@ def _can_edit_course(user: dict[str, Any], course_row: dict) -> bool:
     return False
 
 
-@router.post("/", response_model=CourseOut, status_code=status.HTTP_201_CREATED)
+@router.post("/", response_model=CourseOut, status_code=status.HTTP_201_CREATED, summary="Create course")
 async def create_course(
     payload: CourseCreate,
     user: dict[str, Any] = Depends(require_roles(["Admin"])),
@@ -74,7 +74,7 @@ async def create_course(
     return created.data[0]
 
 
-@router.get("/", response_model=List[CourseOut])
+@router.get("/", response_model=List[CourseOut], summary="List courses by role visibility")
 async def list_courses(user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer", "Student"]))):
     sb = _sb()
     role = ROLE_MAP.get(user["role_id"])
@@ -102,7 +102,7 @@ async def list_courses(user: dict[str, Any] = Depends(require_roles(["Admin", "L
     return res.data or []
 
 
-@router.get("/{course_id}", response_model=CourseOut)
+@router.get("/{course_id}", response_model=CourseOut, summary="Get course by id")
 async def get_course(
     course_id: int,
     user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer", "Student"])),
@@ -117,7 +117,7 @@ async def get_course(
     return row
 
 
-@router.put("/{course_id}", response_model=CourseOut)
+@router.put("/{course_id}", response_model=CourseOut, summary="Update course")
 async def update_course(
     course_id: int,
     payload: CourseUpdate,
@@ -146,7 +146,7 @@ async def update_course(
     return updated.data[0]
 
 
-@router.delete("/{course_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{course_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete course")
 async def delete_course(
     course_id: int,
     user: dict[str, Any] = Depends(require_roles(["Admin"])),
@@ -163,6 +163,7 @@ async def delete_course(
     "/{course_id}/modules",
     response_model=ModuleOut,
     status_code=status.HTTP_201_CREATED,
+    summary="Create module in course",
 )
 async def create_module(
     course_id: int,
@@ -192,7 +193,7 @@ async def create_module(
     return ins.data[0]
 
 
-@router.get("/{course_id}/modules", response_model=List[ModuleOut])
+@router.get("/{course_id}/modules", response_model=List[ModuleOut], summary="List modules in course")
 async def list_course_modules(
     course_id: int,
     user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer", "Student"])),
@@ -211,6 +212,7 @@ async def list_course_modules(
 @router.delete(
     "/{course_id}/modules/{module_id}",
     status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete module from course",
 )
 async def delete_module(
     course_id: int,

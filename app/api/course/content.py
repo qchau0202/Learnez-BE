@@ -86,6 +86,7 @@ async def list_module_materials(
     module_id: int,
     user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer", "Student"])),
 ):
+    """List materials of a module visible to the current role."""
     sb = _sb()
     _module, course = _get_module_and_course(sb, module_id)
     role = ROLE_MAP.get(user.get("role_id"))
@@ -110,12 +111,13 @@ async def list_module_materials(
     "/modules/{module_id}/materials",
     response_model=MaterialOut,
     status_code=status.HTTP_201_CREATED,
+    summary="Upload module material",
 )
 async def upload_content(
     module_id: int,
-    file: UploadFile = File(...),
-    material_type: str = Form("file"),
-    max_size_mb: int = Form(DEFAULT_MAX_MB),
+    file: UploadFile = File(..., description="Binary file to upload."),
+    material_type: str = Form("file", description="Label/type for material (e.g. file, video, link)."),
+    max_size_mb: int = Form(DEFAULT_MAX_MB, description=f"Per-request max file size in MB (1-{ABSOLUTE_MAX_MB})."),
     user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer"])),
 ):
     """Upload material file to bucket, then record metadata row."""
@@ -168,12 +170,12 @@ async def upload_content(
     return mat
 
 
-@router.put("/materials/{material_id}", response_model=MaterialOut)
+@router.put("/materials/{material_id}", response_model=MaterialOut, summary="Update module material")
 async def update_material(
     material_id: int,
-    file: UploadFile | None = File(None),
-    material_type: str | None = Form(None),
-    max_size_mb: int = Form(DEFAULT_MAX_MB),
+    file: UploadFile | None = File(None, description="New file to replace the current one (optional)."),
+    material_type: str | None = Form(None, description="New material type (optional)."),
+    max_size_mb: int = Form(DEFAULT_MAX_MB, description=f"Per-request max file size in MB (1-{ABSOLUTE_MAX_MB})."),
     user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer"])),
 ):
     """Edit material type and/or replace file object."""
@@ -230,7 +232,7 @@ async def update_material(
     return upd.data[0]
 
 
-@router.delete("/materials/{material_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/materials/{material_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete module material")
 async def delete_material(
     material_id: int,
     user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer"])),
