@@ -9,6 +9,10 @@ supabase_service = get_supabase(service_role=True)
 
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        # CORS preflight must not require Authorization
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
         public_paths = {
             "/",
             "/health",

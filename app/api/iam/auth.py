@@ -1,12 +1,24 @@
 from fastapi import APIRouter
+from fastapi import Depends
 from fastapi import HTTPException
 from fastapi import Request
 from pydantic import BaseModel, Field
+from typing import Optional
 from app.core.database import get_supabase
+from app.core.dependencies import ROLE_MAP, get_current_user
 from supabase_auth.errors import AuthApiError
 
 router = APIRouter(tags=["IAM - Authentication"])
 supabase = get_supabase()
+
+
+def _role_slug(role_id) -> str:
+    name = ROLE_MAP.get(role_id)
+    if name == "Admin":
+        return "admin"
+    if name == "Lecturer":
+        return "lecturer"
+    return "student"
 
 
 class LoginRequest(BaseModel):
@@ -16,6 +28,41 @@ class LoginRequest(BaseModel):
     model_config = {
         "json_schema_extra": {"example": {"email": "learnez@email.com", "password": "123456"}}
     }
+
+
+class MeStudentProfileOut(BaseModel):
+    student_id: Optional[str] = None
+    phone_number: Optional[str] = None
+    major: Optional[str] = None
+    enrolled_year: Optional[int] = None
+    current_gpa: Optional[float] = None
+    cumulative_gpa: Optional[float] = None
+    gender: Optional[str] = None
+    date_of_birth: Optional[str] = None
+    faculty_name: Optional[str] = None
+
+
+class MeLecturerProfileOut(BaseModel):
+    lecturer_id: Optional[str] = None
+    phone_number: Optional[str] = None
+    qualification: Optional[str] = None
+    gender: Optional[str] = None
+    faculty_name: Optional[str] = None
+    faculty_id: Optional[int] = None
+    department_name: Optional[str] = None
+    department_faculty_id: Optional[int] = None
+
+
+class MeOut(BaseModel):
+    user_id: str
+    email: Optional[str] = None
+    full_name: Optional[str] = None
+    role_id: Optional[int] = None
+    role: str
+    role_label: str
+    is_active: bool = True
+    student_profile: Optional[MeStudentProfileOut] = None
+    lecturer_profile: Optional[MeLecturerProfileOut] = None
 
 
 @router.post("/login", summary="Login with email/password")
@@ -51,6 +98,98 @@ def login(data: LoginRequest):
         "refresh_token": res.session.refresh_token,
         "user": res.user
     }
+
+
+def _faculty_name(svc, faculty_id) -> str | None:
+    if not faculty_id:
+        return None
+    fr = svc.table("faculties").select("name").eq("id", faculty_id).limit(1).execute()
+    if fr.data:
+        return fr.data[0].get("name")
+    return None
+
+
+def _department_info(svc, department_id) -> dict | None:
+    if not department_id:
+        return None
+    dr = (
+        svc.table("departments")
+        .select("id, name, from_faculty")
+        .eq("id", department_id)
+        .limit(1)
+        .execute()
+    )
+    if not dr.data:
+        return None
+    row = dr.data[0]
+    faculty_id = row.get("from_faculty")
+    return {
+        "id": row.get("id"),
+        "name": row.get("name"),
+        "from_faculty": faculty_id,
+        "from_faculty_name": _faculty_name(svc, faculty_id),
+    }
+
+
+@router.get(
+    "/me",
+    summary="Current LMS profile (Bearer access_token)",
+    response_model=MeOut,
+)
+def get_me(user: dict = Depends(get_current_user)):
+    """`public.users` plus optional `student_profile` / `lecturer_profile` from the database."""
+    user_id = user["user_id"]
+    role_id = user.get("role_id")
+    base = {
+        "user_id": str(user_id),
+        "email": user.get("email"),
+        "full_name": user.get("full_name"),
+        "role_id": role_id,
+        "role": _role_slug(role_id),
+        "role_label": ROLE_MAP.get(role_id, "Student"),
+        "is_active": user.get("is_active", True),
+        "student_profile": None,
+        "lecturer_profile": None,
+    }
+
+    svc = get_supabase(service_role=True)
+    if not svc:
+        return base
+
+    if role_id == 3:
+        sp = svc.table("student_profiles").select("*").eq("user_id", user_id).limit(1).execute()
+        if sp.data:
+            row = sp.data[0]
+            base["student_profile"] = {
+                "student_id": row.get("student_id"),
+                "phone_number": row.get("phone_number"),
+                "major": row.get("major"),
+                "enrolled_year": row.get("enrolled_year"),
+                "current_gpa": row.get("current_gpa"),
+                "cumulative_gpa": row.get("cumulative_gpa"),
+                "gender": row.get("gender"),
+                "date_of_birth": row.get("date_of_birth"),
+                "faculty_name": _faculty_name(svc, row.get("faculty_id")),
+            }
+    elif role_id == 2:
+        lp = svc.table("lecturer_profiles").select("*").eq("user_id", user_id).limit(1).execute()
+        if lp.data:
+            row = lp.data[0]
+            department = _department_info(svc, row.get("department_id"))
+            department_faculty_id = department.get("from_faculty") if department else None
+            faculty_id = department_faculty_id or row.get("faculty_id")
+            base["lecturer_profile"] = {
+                "lecturer_id": row.get("lecturer_id"),
+                "phone_number": row.get("phone_number"),
+                "qualification": row.get("qualification"),
+                "gender": row.get("gender"),
+                "faculty_name": _faculty_name(svc, faculty_id),
+                "faculty_id": faculty_id,
+                "department_name": department.get("name") if department else None,
+                "department_faculty_id": department_faculty_id,
+            }
+
+    return base
 
 
 @router.post("/bootstrap-admin", summary="Bootstrap first admin profile")
