@@ -34,7 +34,17 @@ PERMISSION_CATALOG = [
 ]
 
 ADMIN_FULL_PERMISSION_IDS = [p["permission_id"] for p in PERMISSION_CATALOG]
-LECTURER_DEFAULT_PERMISSION_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+# Lecturer defaults:
+# - Can view/update courses
+# - Cannot create/delete courses
+# - Can manage internals: modules/materials/assignments
+LECTURER_DEFAULT_PERMISSION_IDS = [2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+
+# Student defaults:
+# - Read-only course/module/material access
+# - Assignment learning workflow access (view + submit/edit)
+# - No admin/lecturer authoring permissions
+STUDENT_DEFAULT_PERMISSION_IDS = [2, 6, 10, 14, 15]
 
 
 class PermissionOut(BaseModel):
@@ -149,6 +159,8 @@ async def sync_permission_catalog(user: dict[str, Any] = Depends(require_roles([
             role_perm_ids = ADMIN_FULL_PERMISSION_IDS
         elif role_name == "lecturer":
             role_perm_ids = LECTURER_DEFAULT_PERMISSION_IDS
+        elif role_name == "student":
+            role_perm_ids = STUDENT_DEFAULT_PERMISSION_IDS
         else:
             role_perm_ids = []
 
