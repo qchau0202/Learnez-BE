@@ -421,6 +421,18 @@ async def get_user_permission_overrides(
     return {"user_id": user_id, "overrides": rows.data or []}
 
 
+def _role_default_permission_ids(supabase, role_id: int | None) -> set[int]:
+    if not role_id:
+        return set()
+    res = (
+        supabase.table("role_permissions")
+        .select("permission_id")
+        .eq("role_id", role_id)
+        .execute()
+    )
+    return {row["permission_id"] for row in (res.data or []) if row.get("permission_id") is not None}
+
+
 @router.put("/users/{user_id}/permission-overrides", status_code=status.HTTP_200_OK)
 async def save_user_permission_overrides(
     user_id: str,
@@ -428,20 +440,26 @@ async def save_user_permission_overrides(
     user: dict[str, Any] = Depends(require_roles(["Admin"]))
 ):
     """
-    Replace all user-level permission overrides.
-    - is_allowed=True adds/grants a permission
-    - is_allowed=False revokes a permission granted by role default
+    Persist only **deltas** from the user's current role defaults.
+
+    - Desired state comes from `overrides`: each row is the intended effective allow/deny for that permission.
+    - Rows that match the role default are **not** stored in `user_permissions` (avoids duplicate / noisy rows).
+    - Extra grants (allowed but not in role) → `is_allowed=True`.
+    - Revocations (denied but in role) → `is_allowed=False`.
     """
     supabase = get_supabase(service_role=True)
     target = (
         supabase.table("users")
-        .select("user_id")
+        .select("user_id, role_id")
         .eq("user_id", user_id)
         .limit(1)
         .execute()
     )
     if not target.data:
         raise HTTPException(status_code=404, detail="User not found")
+
+    role_id = target.data[0].get("role_id")
+    role_perm_ids = _role_default_permission_ids(supabase, role_id)
 
     permission_ids = [o.permission_id for o in payload.overrides]
     if permission_ids:
@@ -457,31 +475,40 @@ async def save_user_permission_overrides(
             raise HTTPException(status_code=400, detail=f"Invalid permission_id(s): {invalid}")
 
     admin_user_id = user["user_id"]
+    delta_rows: list[dict[str, Any]] = []
+    for o in payload.overrides:
+        pid = o.permission_id
+        desired = bool(o.is_allowed)
+        in_role = pid in role_perm_ids
+        if desired and in_role:
+            continue
+        if not desired and not in_role:
+            continue
+        delta_rows.append(
+            {
+                "user_id": user_id,
+                "permission_id": pid,
+                "is_allowed": desired,
+                "changed_by": admin_user_id,
+            }
+        )
+
     supabase.table("user_permissions").delete().eq("user_id", user_id).execute()
-    if payload.overrides:
-        supabase.table("user_permissions").insert(
-            [
-                {
-                    "user_id": user_id,
-                    "permission_id": o.permission_id,
-                    "is_allowed": o.is_allowed,
-                    "changed_by": admin_user_id,
-                }
-                for o in payload.overrides
-            ]
-        ).execute()
+    if delta_rows:
+        supabase.table("user_permissions").insert(delta_rows).execute()
 
     return {
         "message": "User permission overrides saved",
         "user_id": user_id,
         "changed_saved_by": admin_user_id,
+        "override_count": len(delta_rows),
         "overrides": [
             {
-                "permission_id": o.permission_id,
-                "is_allowed": o.is_allowed,
+                "permission_id": r["permission_id"],
+                "is_allowed": r["is_allowed"],
                 "changed_by": admin_user_id,
             }
-            for o in payload.overrides
+            for r in delta_rows
         ],
     }
 
