@@ -40,6 +40,9 @@ class MeStudentProfileOut(BaseModel):
     gender: Optional[str] = None
     date_of_birth: Optional[str] = None
     faculty_name: Optional[str] = None
+    department_id: Optional[int] = None
+    department_name: Optional[str] = None
+    student_class: Optional[str] = Field(None, description="Cohort / group (student_profiles.class)")
 
 
 class MeLecturerProfileOut(BaseModel):
@@ -160,6 +163,7 @@ def get_me(user: dict = Depends(get_current_user)):
         sp = svc.table("student_profiles").select("*").eq("user_id", user_id).limit(1).execute()
         if sp.data:
             row = sp.data[0]
+            dept = _department_info(svc, row.get("department_id"))
             base["student_profile"] = {
                 "student_id": row.get("student_id"),
                 "phone_number": row.get("phone_number"),
@@ -170,6 +174,9 @@ def get_me(user: dict = Depends(get_current_user)):
                 "gender": row.get("gender"),
                 "date_of_birth": row.get("date_of_birth"),
                 "faculty_name": _faculty_name(svc, row.get("faculty_id")),
+                "department_id": row.get("department_id"),
+                "department_name": (dept or {}).get("name"),
+                "student_class": row.get("class"),
             }
     elif role_id == 2:
         lp = svc.table("lecturer_profiles").select("*").eq("user_id", user_id).limit(1).execute()

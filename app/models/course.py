@@ -1,6 +1,6 @@
 """Pydantic models aligned with public.courses and related tables."""
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -12,6 +12,15 @@ class CourseBase(BaseModel):
     course_code: Optional[str] = None
     semester: Optional[str] = None
     academic_year: Optional[str] = None
+    class_room: Optional[str] = Field(
+        None,
+        max_length=200,
+        description="Section / room label; distinguishes offerings that share the same course code.",
+    )
+    course_occurences: Optional[int] = Field(None, ge=1, le=60)
+    course_session: Optional[str] = Field(None, max_length=120)
+    course_start_date: Optional[date] = None
+    course_end_date: Optional[date] = None
     lecturer_id: Optional[str] = None
     schedule: Optional[datetime] = None
     is_complete: bool = False
@@ -30,6 +39,10 @@ class CourseCreate(CourseBase):
                 "course_code": "SE-101",
                 "semester": "1",
                 "academic_year": "2025-2026",
+                "class_room": "A1-201",
+                "course_occurences": 15,
+                "course_session": "7:00 - 9:30",
+                "course_start_date": "2026-09-01",
                 "lecturer_id": "b9dd5f4f-40a8-4d5a-8f5d-c63c7a9f440d",
                 "is_complete": False,
             }
@@ -45,6 +58,11 @@ class CourseUpdate(BaseModel):
     course_code: Optional[str] = None
     semester: Optional[str] = None
     academic_year: Optional[str] = None
+    class_room: Optional[str] = Field(None, max_length=200)
+    course_occurences: Optional[int] = Field(None, ge=1, le=60)
+    course_session: Optional[str] = Field(None, max_length=120)
+    course_start_date: Optional[date] = None
+    course_end_date: Optional[date] = None
     lecturer_id: Optional[str] = None
     schedule: Optional[datetime] = None
     is_complete: Optional[bool] = None
@@ -74,6 +92,11 @@ class CourseOut(BaseModel):
     course_code: Optional[str] = None
     created_by: Optional[str] = None
     semester: Optional[str] = None
+    class_room: Optional[str] = None
+    course_occurences: Optional[int] = None
+    course_session: Optional[str] = None
+    course_start_date: Optional[date] = None
+    course_end_date: Optional[date] = None
 
     class Config:
         from_attributes = True
@@ -114,6 +137,35 @@ class CourseEnrollmentOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class CourseActorOut(BaseModel):
+    id: str
+    full_name: Optional[str] = None
+    email: Optional[str] = None
+    lecturer_id: Optional[str] = None
+    faculty_id: Optional[int] = None
+    faculty_name: Optional[str] = None
+    department_id: Optional[int] = None
+    department_name: Optional[str] = None
+    student_class: Optional[str] = Field(
+        None,
+        description="Student cohort from student_profiles.class (distinct from course classroom).",
+    )
+
+
+class CourseAdminItemOut(CourseOut):
+    student_count: int = 0
+    faculty_id: Optional[int] = None
+    faculty_name: Optional[str] = None
+    department_id: Optional[int] = None
+    department_name: Optional[str] = None
+
+
+class CourseAdminManagementOut(BaseModel):
+    courses: list[CourseAdminItemOut]
+    lecturers: list[CourseActorOut]
+    students: list[CourseActorOut]
 
 
 class MaterialOut(BaseModel):

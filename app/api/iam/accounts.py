@@ -97,6 +97,7 @@ class AccountCreate(BaseModel):
     cumulative_gpa: float | None = None
     qualification: str | None = None
     phone_number: str | None = None
+    student_class: str | None = Field(None, max_length=120, description="Cohort / group label (student_profiles.class)")
 
 
 class AccountUpdate(BaseModel):
@@ -116,6 +117,7 @@ class AccountUpdate(BaseModel):
     cumulative_gpa: float | None = None
     qualification: str | None = None
     phone_number: str | None = None
+    student_class: str | None = Field(None, max_length=120)
 
 
 class AccountOut(BaseModel):
@@ -126,6 +128,7 @@ class AccountOut(BaseModel):
     role: str
     is_active: bool
     faculty_name: str | None = None
+    department_id: int | None = None
     department_name: str | None = None
     student_id: str | None = None
     lecturer_id: str | None = None
@@ -136,6 +139,7 @@ class AccountOut(BaseModel):
     cumulative_gpa: float | None = None
     qualification: str | None = None
     phone_number: str | None = None
+    student_class: str | None = None
     created_at: str | None = None
 
 
@@ -148,6 +152,10 @@ class DepartmentOut(BaseModel):
     id: int
     name: str | None = None
     from_faculty: int | None = None
+
+
+class StudentClassOut(BaseModel):
+    value: str
 
 
 def _as_account_out(svc, user_row: dict[str, Any]) -> dict[str, Any]:
@@ -165,12 +173,17 @@ def _as_account_out(svc, user_row: dict[str, Any]) -> dict[str, Any]:
         lecturer = q.data[0] if q.data else None
 
     faculty_id = None
+    department_id = None
     department_name = None
     if student:
         faculty_id = student.get("faculty_id")
+        department_id = student.get("department_id")
+        dept = _department_info(svc, department_id)
+        department_name = (dept or {}).get("name")
     if lecturer:
         department = _department_info(svc, lecturer.get("department_id"))
         faculty_id = (department or {}).get("from_faculty") or lecturer.get("faculty_id")
+        department_id = lecturer.get("department_id")
         department_name = (department or {}).get("name")
 
     return {
@@ -181,6 +194,7 @@ def _as_account_out(svc, user_row: dict[str, Any]) -> dict[str, Any]:
         "role": role,
         "is_active": bool(user_row.get("is_active", True)),
         "faculty_name": _faculty_name(svc, faculty_id),
+        "department_id": int(department_id) if department_id is not None else None,
         "department_name": department_name,
         "student_id": (student or {}).get("student_id"),
         "lecturer_id": (lecturer or {}).get("lecturer_id"),
@@ -191,6 +205,7 @@ def _as_account_out(svc, user_row: dict[str, Any]) -> dict[str, Any]:
         "cumulative_gpa": (student or {}).get("cumulative_gpa"),
         "qualification": (lecturer or {}).get("qualification"),
         "phone_number": (student or lecturer or {}).get("phone_number"),
+        "student_class": (student or {}).get("class"),
         "created_at": user_row.get("created_at"),
     }
 
@@ -214,6 +229,14 @@ async def list_departments(user=Depends(require_roles(["Admin"]))):
         or []
     )
     return rows
+
+
+@router.get("/meta/student-classes", response_model=list[StudentClassOut], summary="List distinct student classes")
+async def list_student_classes(user=Depends(require_roles(["Admin"]))):
+    svc = _svc()
+    rows = svc.table("student_profiles").select("class").execute().data or []
+    values = sorted({str(r.get("class", "")).strip() for r in rows if str(r.get("class", "")).strip()})
+    return [{"value": v} for v in values]
 
 
 @router.post("/", response_model=AccountOut, status_code=status.HTTP_201_CREATED, summary="Create account")
@@ -257,6 +280,9 @@ async def create_account(account: AccountCreate, user=Depends(require_roles(["Ad
                 }
             ).execute()
         elif account.role_id == 3:
+            cohort = None
+            if account.student_class is not None:
+                cohort = str(account.student_class).strip() or None
             svc.table("student_profiles").upsert(
                 {
                     "user_id": user_id,
@@ -269,6 +295,8 @@ async def create_account(account: AccountCreate, user=Depends(require_roles(["Ad
                     "cumulative_gpa": _norm_gpa(account.cumulative_gpa),
                     "phone_number": account.phone_number,
                     "faculty_id": account.faculty_id,
+                    "department_id": account.department_id,
+                    "class": cohort,
                 }
             ).execute()
 
@@ -284,12 +312,54 @@ async def create_account(account: AccountCreate, user=Depends(require_roles(["Ad
 async def list_accounts(
     role_id: Optional[int] = None,
     search: Optional[str] = None,
+    student_class: Optional[str] = None,
+    faculty_id: Optional[int] = None,
+    department_id: Optional[int] = None,
     user=Depends(require_roles(["Admin"])),
 ):
     svc = _svc()
     query = svc.table("users").select("*").order("created_at", desc=True)
     if role_id:
         query = query.eq("role_id", role_id)
+    filtered_uids: set[str] | None = None
+    if faculty_id is not None or department_id is not None:
+        candidate_uids: set[str] = set()
+        sp_q = svc.table("student_profiles").select("user_id")
+        if faculty_id is not None:
+            sp_q = sp_q.eq("faculty_id", faculty_id)
+        if department_id is not None:
+            sp_q = sp_q.eq("department_id", department_id)
+        for r in sp_q.execute().data or []:
+            uid = r.get("user_id")
+            if uid:
+                candidate_uids.add(uid)
+
+        lp_q = svc.table("lecturer_profiles").select("user_id")
+        if faculty_id is not None:
+            lp_q = lp_q.eq("faculty_id", faculty_id)
+        if department_id is not None:
+            lp_q = lp_q.eq("department_id", department_id)
+        for r in lp_q.execute().data or []:
+            uid = r.get("user_id")
+            if uid:
+                candidate_uids.add(uid)
+
+        filtered_uids = candidate_uids
+
+    if student_class and student_class.strip():
+        token = student_class.strip()
+        sp = svc.table("student_profiles").select("user_id").ilike("class", f"%{token}%").execute()
+        class_uids = {r["user_id"] for r in (sp.data or []) if r.get("user_id")}
+        if filtered_uids is None:
+            filtered_uids = class_uids
+        else:
+            filtered_uids = filtered_uids.intersection(class_uids)
+        if not filtered_uids:
+            return []
+    if filtered_uids is not None:
+        if not filtered_uids:
+            return []
+        query = query.in_("user_id", list(filtered_uids))
     if search:
         token = search.strip()
         query = query.or_(f"email.ilike.%{token}%,full_name.ilike.%{token}%")
@@ -342,6 +412,9 @@ async def update_account(
             }
         ).execute()
     elif role_id == 3:
+        cohort = None
+        if payload.student_class is not None:
+            cohort = str(payload.student_class).strip() or None
         svc.table("student_profiles").upsert(
             {
                 "user_id": account_id,
@@ -354,6 +427,8 @@ async def update_account(
                 "cumulative_gpa": _norm_gpa(payload.cumulative_gpa),
                 "phone_number": payload.phone_number,
                 "faculty_id": payload.faculty_id,
+                "department_id": payload.department_id,
+                "class": cohort,
             }
         ).execute()
 
@@ -416,6 +491,9 @@ async def import_accounts(
                 cumulative_gpa=_norm_gpa(row.get("cumulative_gpa")),
                 qualification=(str(row.get("qualification", "")).strip() or None),
                 phone_number=(str(row.get("phone_number", "")).strip() or None),
+                student_class=(
+                    str(row.get("student_class", "") or row.get("class", "")).strip() or None
+                ),
             )
             await create_account(payload, user)
             created += 1
