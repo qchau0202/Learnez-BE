@@ -10,7 +10,7 @@ class CourseBase(BaseModel):
     title: str = Field(default="", max_length=500)
     description: str = Field(default="", max_length=2000)
     course_code: Optional[str] = None
-    semester: Optional[str] = None
+    semester: Optional[int] = Field(None, ge=1, le=4, description="Academic semester index (1, 2, 3…).")
     academic_year: Optional[str] = None
     class_room: Optional[str] = Field(
         None,
@@ -18,10 +18,29 @@ class CourseBase(BaseModel):
         description="Section / room label; distinguishes offerings that share the same course code.",
     )
     course_occurences: Optional[int] = Field(None, ge=1, le=60)
-    course_session: Optional[str] = Field(None, max_length=120)
+    course_session: Optional[str] = Field(
+        None,
+        max_length=120,
+        description="Time-of-day slot label for the session, e.g. '7:00 - 9:30'.",
+    )
+    course_session_date: Optional[str] = Field(
+        None,
+        max_length=30,
+        description="Day of week when the session happens (Monday..Saturday).",
+    )
+    course_session_duration: Optional[int] = Field(
+        None,
+        ge=0,
+        le=1440,
+        description="Duration of a single session in minutes.",
+    )
     course_start_date: Optional[date] = None
     course_end_date: Optional[date] = None
     lecturer_id: Optional[str] = None
+    from_department: Optional[int] = Field(
+        None,
+        description="FK → departments.id. Authoritative department the course belongs to.",
+    )
     schedule: Optional[datetime] = None
     is_complete: bool = False
 
@@ -37,13 +56,16 @@ class CourseCreate(CourseBase):
                 "title": "Software Engineering Fundamentals",
                 "description": "Core software engineering concepts and practices.",
                 "course_code": "SE-101",
-                "semester": "1",
+                "semester": 1,
                 "academic_year": "2025-2026",
                 "class_room": "A1-201",
                 "course_occurences": 15,
                 "course_session": "7:00 - 9:30",
+                "course_session_date": "Monday",
+                "course_session_duration": 150,
                 "course_start_date": "2026-09-01",
                 "lecturer_id": "b9dd5f4f-40a8-4d5a-8f5d-c63c7a9f440d",
+                "from_department": 1,
                 "is_complete": False,
             }
         }
@@ -56,14 +78,17 @@ class CourseUpdate(BaseModel):
     title: Optional[str] = Field(None, min_length=1, max_length=500)
     description: Optional[str] = None
     course_code: Optional[str] = None
-    semester: Optional[str] = None
+    semester: Optional[int] = Field(None, ge=1, le=4)
     academic_year: Optional[str] = None
     class_room: Optional[str] = Field(None, max_length=200)
     course_occurences: Optional[int] = Field(None, ge=1, le=60)
     course_session: Optional[str] = Field(None, max_length=120)
+    course_session_date: Optional[str] = Field(None, max_length=30)
+    course_session_duration: Optional[int] = Field(None, ge=0, le=1440)
     course_start_date: Optional[date] = None
     course_end_date: Optional[date] = None
     lecturer_id: Optional[str] = None
+    from_department: Optional[int] = None
     schedule: Optional[datetime] = None
     is_complete: Optional[bool] = None
 
@@ -91,15 +116,22 @@ class CourseOut(BaseModel):
     is_complete: Optional[bool] = False
     course_code: Optional[str] = None
     created_by: Optional[str] = None
-    semester: Optional[str] = None
+    semester: Optional[int] = None
     class_room: Optional[str] = None
     course_occurences: Optional[int] = None
     course_session: Optional[str] = None
+    course_session_date: Optional[str] = None
+    course_session_duration: Optional[int] = None
     course_start_date: Optional[date] = None
     course_end_date: Optional[date] = None
+    from_department: Optional[int] = None
     student_count: Optional[int] = Field(
         None,
         description="Enrollment count; computed for GET by id, not stored on courses row.",
+    )
+    lecturer_name: Optional[str] = Field(
+        None,
+        description="Resolved full name for the assigned lecturer (joined from public.users).",
     )
 
     class Config:
