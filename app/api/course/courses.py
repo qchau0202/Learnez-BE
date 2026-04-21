@@ -95,9 +95,12 @@ async def create_course(
         "class_room": payload.class_room,
         "course_occurences": payload.course_occurences,
         "course_session": payload.course_session,
+        "course_session_date": payload.course_session_date,
+        "course_session_duration": payload.course_session_duration,
         "course_start_date": payload.course_start_date.isoformat() if payload.course_start_date else None,
         "course_end_date": payload.course_end_date.isoformat() if payload.course_end_date else None,
         "lecturer_id": payload.lecturer_id,
+        "from_department": payload.from_department,
         "schedule": payload.schedule.isoformat() if payload.schedule else None,
         "is_complete": payload.is_complete,
         "created_by": user["user_id"],
@@ -113,6 +116,58 @@ async def create_course(
     return created.data[0]
 
 
+def _enrich_courses_for_list(sb, courses: list[dict]) -> list[dict]:
+    """Attach `lecturer_name` and `student_count` fields to each course row.
+
+    Failures on the auxiliary queries must never break the list endpoint — we
+    degrade gracefully so the UI can still render the core course data.
+    """
+    if not courses:
+        return []
+
+    lecturer_ids = sorted({c.get("lecturer_id") for c in courses if c.get("lecturer_id")})
+    name_by_uid: dict[str, str | None] = {}
+    if lecturer_ids:
+        try:
+            users_res = (
+                sb.table("users")
+                .select("user_id,full_name")
+                .in_("user_id", lecturer_ids)
+                .execute()
+            )
+            for r in users_res.data or []:
+                name_by_uid[str(r.get("user_id"))] = r.get("full_name")
+        except Exception as exc:
+            logger.warning("list_courses: could not resolve lecturer names: %s", exc)
+
+    course_ids = [c.get("id") for c in courses if c.get("id") is not None]
+    count_by_cid: dict[int, int] = {}
+    if course_ids:
+        try:
+            enr_res = (
+                sb.table("course_enrollments")
+                .select("course_id")
+                .in_("course_id", course_ids)
+                .execute()
+            )
+            for r in enr_res.data or []:
+                cid = r.get("course_id")
+                if cid is None:
+                    continue
+                count_by_cid[cid] = count_by_cid.get(cid, 0) + 1
+        except Exception as exc:
+            logger.warning("list_courses: could not compute enrollment counts: %s", exc)
+
+    enriched: list[dict] = []
+    for c in courses:
+        row = dict(c)
+        lid = row.get("lecturer_id")
+        row["lecturer_name"] = name_by_uid.get(str(lid)) if lid else None
+        row["student_count"] = count_by_cid.get(row.get("id"), 0)
+        enriched.append(row)
+    return enriched
+
+
 @router.get("/", response_model=List[CourseOut], summary="List courses by role visibility")
 async def list_courses(user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer", "Student"]))):
     sb = _sb()
@@ -121,7 +176,7 @@ async def list_courses(user: dict[str, Any] = Depends(require_roles(["Admin", "L
 
     if role == "Admin":
         res = sb.table("courses").select("*").order("id", desc=True).execute()
-        return res.data or []
+        return _enrich_courses_for_list(sb, res.data or [])
 
     if role == "Lecturer":
         res = (
@@ -131,14 +186,14 @@ async def list_courses(user: dict[str, Any] = Depends(require_roles(["Admin", "L
             .order("id", desc=True)
             .execute()
         )
-        return res.data or []
+        return _enrich_courses_for_list(sb, res.data or [])
 
     enr = sb.table("course_enrollments").select("course_id").eq("student_id", uid).execute()
     ids = [r["course_id"] for r in (enr.data or [])]
     if not ids:
         return []
     res = sb.table("courses").select("*").in_("id", ids).order("id", desc=True).execute()
-    return res.data or []
+    return _enrich_courses_for_list(sb, res.data or [])
 
 
 @router.get(
@@ -170,7 +225,11 @@ async def admin_course_management_data(
         elif status == "active":
             course_query = course_query.eq("is_complete", False)
     if semester and semester != "all":
-        course_query = course_query.eq("semester", semester)
+        # Semester is numeric in DB; accept both int and numeric-string inputs.
+        try:
+            course_query = course_query.eq("semester", int(semester))
+        except (TypeError, ValueError):
+            course_query = course_query.eq("semester", semester)
     if academic_year and academic_year != "all":
         course_query = course_query.eq("academic_year", academic_year)
     if lecturer_id and lecturer_id != "all":
@@ -266,14 +325,33 @@ async def admin_course_management_data(
     }
     course_items = []
     for c in courses:
-        lmeta = lecturer_meta_by_id.get(c.get("lecturer_id"), {})
+        # Prefer the course-owned department (courses.from_department) and derive
+        # faculty from departments.from_faculty. Fall back to the lecturer profile
+        # only when the course row has no department assigned (legacy data).
+        course_dep_id = c.get("from_department")
+        resolved_faculty_id = None
+        resolved_faculty_name = None
+        resolved_department_id = course_dep_id
+        resolved_department_name = None
+        if course_dep_id is not None:
+            dep = dep_by_id.get(course_dep_id, {})
+            resolved_faculty_id = dep.get("from_faculty")
+            resolved_faculty_name = faculty_name_by_id.get(resolved_faculty_id) if resolved_faculty_id else None
+            resolved_department_name = dep.get("name")
+        else:
+            lmeta = lecturer_meta_by_id.get(c.get("lecturer_id"), {})
+            resolved_faculty_id = lmeta.get("faculty_id")
+            resolved_faculty_name = lmeta.get("faculty_name")
+            resolved_department_id = lmeta.get("department_id")
+            resolved_department_name = lmeta.get("department_name")
+
         row = {
             **c,
             "student_count": count_map.get(c["id"], 0),
-            "faculty_id": lmeta.get("faculty_id"),
-            "faculty_name": lmeta.get("faculty_name"),
-            "department_id": lmeta.get("department_id"),
-            "department_name": lmeta.get("department_name"),
+            "faculty_id": resolved_faculty_id,
+            "faculty_name": resolved_faculty_name,
+            "department_id": resolved_department_id,
+            "department_name": resolved_department_name,
         }
         if faculty_id is not None and row.get("faculty_id") != faculty_id:
             continue
@@ -308,6 +386,24 @@ async def get_course(
             exc,
         )
         out["student_count"] = None
+    lid = out.get("lecturer_id")
+    if lid:
+        try:
+            lu = (
+                sb.table("users")
+                .select("full_name")
+                .eq("user_id", lid)
+                .limit(1)
+                .execute()
+            )
+            out["lecturer_name"] = (lu.data or [{}])[0].get("full_name")
+        except Exception as exc:
+            logger.warning(
+                "get_course: could not resolve lecturer name for course_id=%s: %s",
+                course_id,
+                exc,
+            )
+            out["lecturer_name"] = None
     return out
 
 
@@ -329,6 +425,8 @@ async def update_course(
     if ROLE_MAP.get(user["role_id"]) == "Lecturer":
         data.pop("lecturer_id", None)
         data.pop("created_by", None)
+        # Faculty/department assignment is an admin-only operation.
+        data.pop("from_department", None)
     if "schedule" in data and data["schedule"] is not None:
         data["schedule"] = data["schedule"].isoformat()
     if "course_start_date" in data and data["course_start_date"] is not None:
