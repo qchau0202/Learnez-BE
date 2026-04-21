@@ -136,7 +136,7 @@ def main(argv: list[str] | None = None) -> int:
     up = requests.post(
         f"{BASE}/api/content/modules/{module_id}/materials",
         headers=uploader,
-        data={"material_type": "slides", "max_size_mb": "10"},
+        data={"name": "Intro", "description": "Week 1 reading"},
         files={"file": ("intro.txt", b"hello material", "text/plain")},
         timeout=30,
     )
@@ -145,13 +145,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     mid = up.json()["id"]
 
-    # over-limit check: max_size_mb=1 with 2MB payload
+    # over-limit check: server default max (10MB) — payload one byte over
+    limit_bytes = 10 * 1024 * 1024
     too_big = requests.post(
         f"{BASE}/api/content/modules/{module_id}/materials",
         headers=uploader,
-        data={"material_type": "slides", "max_size_mb": "1"},
-        files={"file": ("big.bin", b"x" * (2 * 1024 * 1024), "application/octet-stream")},
-        timeout=30,
+        files={"file": ("big.bin", b"x" * (limit_bytes + 1), "application/octet-stream")},
+        timeout=120,
     )
     print("upload too big (expect 413)", too_big.status_code)
     if too_big.status_code != 413:
@@ -169,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
     upd = requests.put(
         f"{BASE}/api/content/materials/{mid}",
         headers=uploader,
-        data={"material_type": "pdf", "max_size_mb": "10"},
+        data={"name": "Intro v2", "description": "Updated"},
         files={"file": ("intro-v2.txt", b"updated material", "text/plain")},
         timeout=30,
     )

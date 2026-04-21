@@ -366,7 +366,7 @@ def main() -> int:
     mat_ok = False
     try:
         files = {"file": ("scn-e2e.txt", b"scenario test", "text/plain")}
-        data = {"material_type": "file", "max_size_mb": "10"}
+        data = {"name": "E2E material", "description": ""}
         mu = requests.post(
             f"{BASE}/api/content/modules/{module_id}/materials",
             headers=auth_bearer(lec_t),

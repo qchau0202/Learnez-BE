@@ -5,8 +5,11 @@ from __future__ import annotations
 import os
 from urllib.parse import unquote, urlparse
 
+import time
+
 import cloudinary
 import cloudinary.uploader
+import cloudinary.utils
 
 _configured = False
 
@@ -55,6 +58,25 @@ def upload_bytes(
 def delete_public_id(public_id: str) -> dict:
     ensure_cloudinary_configured()
     return cloudinary.uploader.destroy(public_id, resource_type="raw", invalidate=True)
+
+
+def signed_download_url(public_id: str, *, ttl_seconds: int = 3600) -> str:
+    """Return a short-lived signed delivery URL for a raw resource.
+
+    Works even if the account has "Restricted media types" enabled (PDF/ZIP/etc.),
+    because the signature authenticates the request server-to-server.
+    """
+    ensure_cloudinary_configured()
+    expires_at = int(time.time()) + max(60, ttl_seconds)
+    url, _options = cloudinary.utils.cloudinary_url(
+        public_id,
+        resource_type="raw",
+        type="upload",
+        secure=True,
+        sign_url=True,
+        expires_at=expires_at,
+    )
+    return url
 
 
 def public_id_from_url(file_url: str | None) -> str | None:

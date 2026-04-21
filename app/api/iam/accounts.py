@@ -232,7 +232,7 @@ async def list_departments(user=Depends(require_roles(["Admin"]))):
 
 
 @router.get("/meta/student-classes", response_model=list[StudentClassOut], summary="List distinct student classes")
-async def list_student_classes(user=Depends(require_roles(["Admin"]))):
+async def list_student_classes(user=Depends(require_roles(["Admin", "Lecturer"]))):
     svc = _svc()
     rows = svc.table("student_profiles").select("class").execute().data or []
     values = sorted({str(r.get("class", "")).strip() for r in rows if str(r.get("class", "")).strip()})
