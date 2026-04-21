@@ -1,7 +1,7 @@
 """Pydantic models aligned with public.courses and related tables."""
 
 from datetime import date, datetime
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -97,6 +97,10 @@ class CourseOut(BaseModel):
     course_session: Optional[str] = None
     course_start_date: Optional[date] = None
     course_end_date: Optional[date] = None
+    student_count: Optional[int] = Field(
+        None,
+        description="Enrollment count; computed for GET by id, not stored on courses row.",
+    )
 
     class Config:
         from_attributes = True
@@ -122,6 +126,11 @@ class ModuleCreate(BaseModel):
     }
 
 
+class ModuleUpdate(BaseModel):
+    title: Optional[str] = Field(None, min_length=1, max_length=500)
+    description: Optional[str] = Field(None, max_length=2000)
+
+
 class ModuleOut(ModuleBase):
     id: int
     created_at: datetime
@@ -137,6 +146,18 @@ class CourseEnrollmentOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class EnrollmentRosterRow(BaseModel):
+    """Student directory row scoped to enrollment flows for a single course (lecturer/admin)."""
+
+    id: str = Field(..., description="user_id")
+    full_name: Optional[str] = None
+    email: Optional[str] = None
+    student_class: Optional[str] = Field(
+        None,
+        description="Cohort from student_profiles.class",
+    )
 
 
 class CourseActorOut(BaseModel):
@@ -175,6 +196,13 @@ class MaterialOut(BaseModel):
     material_type: Optional[str] = None
     file_url: Optional[str] = None
     uploaded_by: Optional[str] = None
+    name: Optional[str] = None
+    description: Optional[str] = None
+    mime_type: Optional[str] = None
+    size_bytes: Optional[int] = None
+    storage_provider: Optional[str] = None
+    cloudinary_public_id: Optional[str] = None
+    metadata: Optional[dict[str, Any]] = None
 
     class Config:
         from_attributes = True

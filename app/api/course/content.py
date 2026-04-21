@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import logging
+import mimetypes
 from typing import Any, List
+from urllib.parse import quote
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
+import httpx
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
+from fastapi.responses import StreamingResponse
 
 from app.core.database import get_supabase
 from app.core.dependencies import ROLE_MAP, require_roles
@@ -15,8 +20,11 @@ from app.services.storage.cloudinary_service import (
     cloudinary_enabled,
     delete_public_id,
     public_id_from_url,
+    signed_download_url,
     upload_bytes,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/content", tags=["Course & Content - Content"])
 
@@ -33,6 +41,32 @@ def _sb():
 
 def _safe_filename(name: str) -> str:
     return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in (name or "file.bin"))
+
+
+def _stem_display_name(filename: str) -> str:
+    """Human-readable default title from upload filename (strip path, drop last extension)."""
+    base = (filename or "file").replace("\\", "/").split("/")[-1]
+    if "." in base:
+        return ".".join(base.split(".")[:-1]) or base
+    return base
+
+
+def _infer_material_type(mime: str | None) -> str:
+    """UI category from MIME — not user-editable."""
+    if not mime:
+        return "file"
+    m = mime.lower()
+    if m.startswith("video/"):
+        return "video"
+    if m.startswith("audio/"):
+        return "audio"
+    if m.startswith("image/"):
+        return "image"
+    if m == "application/pdf":
+        return "pdf"
+    if m in ("application/msword",) or "wordprocessingml" in m or m.startswith("text/"):
+        return "document"
+    return "file"
 
 
 def _require_cloudinary():
@@ -79,14 +113,7 @@ def _ensure_size_limit(max_size_mb: int | None, file_bytes: bytes):
         )
 
 
-@router.get("/modules/{module_id}/materials", response_model=List[MaterialOut])
-async def list_module_materials(
-    module_id: int,
-    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer", "Student"])),
-):
-    """List materials of a module visible to the current role."""
-    sb = _sb()
-    _module, course = _get_module_and_course(sb, module_id)
+def _ensure_material_access(sb, user: dict[str, Any], course: dict) -> None:
     role = ROLE_MAP.get(user.get("role_id"))
     uid = user.get("user_id")
     if role == "Student":
@@ -102,8 +129,114 @@ async def list_module_materials(
             raise HTTPException(status_code=403, detail="Forbidden")
     elif role == "Lecturer" and not _can_manage_module(user, course):
         raise HTTPException(status_code=403, detail="Forbidden")
+
+
+@router.get("/modules/{module_id}/materials", response_model=List[MaterialOut])
+async def list_module_materials(
+    module_id: int,
+    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer", "Student"])),
+):
+    """List materials of a module visible to the current role."""
+    sb = _sb()
+    _module, course = _get_module_and_course(sb, module_id)
+    _ensure_material_access(sb, user, course)
     rows = sb.table("module_materials").select("*").eq("module_id", module_id).order("id", desc=True).execute()
     return rows.data or []
+
+
+@router.get(
+    "/materials/{material_id}/download",
+    summary="Download or view a module material (auth-checked proxy)",
+)
+async def download_material(
+    material_id: int,
+    inline: bool = Query(False, description="If true, stream with Content-Disposition: inline."),
+    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer", "Student"])),
+):
+    """Stream a module material through the backend so access is always auth-checked.
+
+    This avoids depending on Cloudinary public delivery (which is disabled by default
+    for PDFs/ZIPs on new accounts) and hides the raw Cloudinary URL from the client.
+    """
+    sb = _sb()
+    mat_res = sb.table("module_materials").select("*").eq("id", material_id).limit(1).execute()
+    if not mat_res.data:
+        raise HTTPException(status_code=404, detail="Material not found")
+    row = mat_res.data[0]
+    module_id = row.get("module_id")
+    if module_id is None:
+        raise HTTPException(status_code=404, detail="Material has no module")
+    _module, course = _get_module_and_course(sb, module_id)
+    _ensure_material_access(sb, user, course)
+
+    file_url = row.get("file_url")
+    public_id = row.get("cloudinary_public_id") or public_id_from_url(file_url)
+    source_url: str | None = None
+    if public_id:
+        try:
+            source_url = signed_download_url(public_id)
+        except Exception as exc:  # noqa: BLE001 - fall back to direct URL
+            logger.warning("signed_download_url failed for public_id=%s: %s", public_id, exc)
+    if not source_url:
+        source_url = file_url
+    if not source_url:
+        raise HTTPException(status_code=404, detail="Material has no file")
+
+    # Preserve a sensible filename (name column + extension inferred from file_url).
+    display_name = (row.get("name") or "download").strip() or "download"
+    ext = ""
+    try:
+        tail = file_url.rsplit("?", 1)[0].rsplit("/", 1)[-1] if file_url else ""
+        if "." in tail:
+            ext = "." + tail.rsplit(".", 1)[-1]
+    except Exception:
+        ext = ""
+    if ext and not display_name.lower().endswith(ext.lower()):
+        display_name = f"{display_name}{ext}"
+
+    mime = row.get("mime_type") or mimetypes.guess_type(display_name)[0] or "application/octet-stream"
+    disposition = "inline" if inline else "attachment"
+    # RFC 5987 encoded filename* for non-ASCII safety
+    filename_star = quote(display_name, safe="")
+    safe_ascii = display_name.encode("ascii", "ignore").decode("ascii") or "download"
+    content_disposition = (
+        f'{disposition}; filename="{safe_ascii}"; filename*=UTF-8\'\'{filename_star}'
+    )
+
+    client = httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=120.0), follow_redirects=True)
+    try:
+        req = client.build_request("GET", source_url)
+        upstream = await client.send(req, stream=True)
+    except Exception as exc:  # noqa: BLE001
+        await client.aclose()
+        logger.warning("download_material upstream fetch failed: %s", exc)
+        raise HTTPException(status_code=502, detail="Could not fetch file from storage") from exc
+
+    if upstream.status_code >= 400:
+        status_code = upstream.status_code
+        await upstream.aclose()
+        await client.aclose()
+        logger.warning("download_material upstream returned %s for material %s", status_code, material_id)
+        raise HTTPException(status_code=502, detail=f"Storage returned {status_code}")
+
+    response_headers = {
+        "Content-Disposition": content_disposition,
+        "Cache-Control": "private, max-age=0, no-store",
+    }
+    content_length = upstream.headers.get("Content-Length")
+    if content_length:
+        response_headers["Content-Length"] = content_length
+
+    async def iterator():
+        try:
+            async for chunk in upstream.aiter_bytes(chunk_size=64 * 1024):
+                if chunk:
+                    yield chunk
+        finally:
+            await upstream.aclose()
+            await client.aclose()
+
+    return StreamingResponse(iterator(), media_type=mime, headers=response_headers)
 
 @router.post(
     "/modules/{module_id}/materials",
@@ -114,11 +247,11 @@ async def list_module_materials(
 async def upload_content(
     module_id: int,
     file: UploadFile = File(..., description="Binary file to upload."),
-    material_type: str = Form("file", description="Label/type for material (e.g. file, video, link)."),
-    max_size_mb: int = Form(DEFAULT_MAX_MB, description=f"Per-request max file size in MB (1-{ABSOLUTE_MAX_MB})."),
+    name: str | None = Form(None, description="Display name (defaults from filename)."),
+    description: str | None = Form(None, description="Optional description."),
     user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer"])),
 ):
-    """Upload material file to bucket, then record metadata row."""
+    """Upload material file to Cloudinary, then record metadata row (type derived from MIME)."""
     _require_cloudinary()
     sb = _sb()
     _module, course = _get_module_and_course(sb, module_id)
@@ -126,10 +259,13 @@ async def upload_content(
         raise HTTPException(status_code=403, detail="Forbidden")
 
     file_bytes = await file.read()
-    _ensure_size_limit(max_size_mb, file_bytes)
+    _ensure_size_limit(None, file_bytes)
     filename = _safe_filename(file.filename or "file.bin")
     folder = f"learnez/courses/{course['id']}/modules/{module_id}"
     unique_name = f"{uuid4().hex}_{filename}"
+    material_type = _infer_material_type(file.content_type)
+    title = (name or "").strip() or _stem_display_name(file.filename or filename)
+    desc = (description or "").strip() or None
 
     try:
         uploaded = upload_bytes(
@@ -161,6 +297,8 @@ async def upload_content(
                     "bytes": uploaded.get("bytes"),
                 },
                 "uploaded_by": user["user_id"],
+                "name": title,
+                "description": desc,
             }
         )
         .execute()
@@ -179,7 +317,7 @@ async def upload_content(
         module_id=module_id,
         course_id=course["id"],
         material_id=mat["id"],
-        material_label=filename,
+        material_label=title,
     )
     return mat
 
@@ -188,11 +326,11 @@ async def upload_content(
 async def update_material(
     material_id: int,
     file: UploadFile | None = File(None, description="New file to replace the current one (optional)."),
-    material_type: str | None = Form(None, description="New material type (optional)."),
-    max_size_mb: int = Form(DEFAULT_MAX_MB, description=f"Per-request max file size in MB (1-{ABSOLUTE_MAX_MB})."),
+    name: str | None = Form(None, description="Display name (optional)."),
+    description: str | None = Form(None, description="Description (optional)."),
     user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer"])),
 ):
-    """Edit material type and/or replace file object."""
+    """Edit name/description and/or replace file (material_type follows MIME when file is replaced)."""
     _require_cloudinary()
     sb = _sb()
     mat = sb.table("module_materials").select("*").eq("id", material_id).limit(1).execute()
@@ -205,15 +343,17 @@ async def update_material(
         raise HTTPException(status_code=403, detail="Forbidden")
 
     data: dict[str, Any] = {}
-    if material_type is not None:
-        data["material_type"] = material_type
+    if name is not None:
+        data["name"] = name.strip() or None
+    if description is not None:
+        data["description"] = (description or "").strip() or None
 
     old_public_id = row.get("cloudinary_public_id") or public_id_from_url(row.get("file_url"))
     new_path = None
     new_public_id = None
     if file is not None:
         file_bytes = await file.read()
-        _ensure_size_limit(max_size_mb, file_bytes)
+        _ensure_size_limit(None, file_bytes)
         filename = _safe_filename(file.filename or "file.bin")
         folder = f"learnez/courses/{course['id']}/modules/{module_id}"
         unique_name = f"{uuid4().hex}_{filename}"
@@ -235,12 +375,15 @@ async def update_material(
         data["cloudinary_public_id"] = new_public_id
         data["mime_type"] = file.content_type
         data["size_bytes"] = int(uploaded.get("bytes") or len(file_bytes))
+        data["material_type"] = _infer_material_type(file.content_type)
         data["metadata"] = {
             "resource_type": uploaded.get("resource_type"),
             "format": uploaded.get("format"),
             "bytes": uploaded.get("bytes"),
         }
         data["uploaded_by"] = user["user_id"]
+        if data.get("name") is None and file.filename:
+            data["name"] = _stem_display_name(file.filename)
 
     if not data:
         return row

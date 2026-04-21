@@ -1,7 +1,10 @@
 """Course CRUD — aligned with public.courses (Supabase)."""
 
+import logging
 from datetime import timedelta
 from typing import Any, List
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
@@ -14,6 +17,7 @@ from app.models.course import (
     CourseUpdate,
     ModuleCreate,
     ModuleOut,
+    ModuleUpdate,
 )
 from app.services.assignment_cascade import delete_assignment_cascade
 
@@ -291,7 +295,20 @@ async def get_course(
     row = res.data[0]
     if not _can_view_course(user, row):
         raise HTTPException(status_code=403, detail="Forbidden")
-    return row
+    out = dict(row)
+    # Enrollment count is a separate query; Supabase/PostgREST can occasionally return 502 HTML
+    # (gateway) instead of JSON — do not fail the whole GET.
+    try:
+        enr = sb.table("course_enrollments").select("student_id").eq("course_id", course_id).execute()
+        out["student_count"] = len(enr.data or [])
+    except Exception as exc:
+        logger.warning(
+            "get_course: could not load enrollment count for course_id=%s: %s",
+            course_id,
+            exc,
+        )
+        out["student_count"] = None
+    return out
 
 
 @router.put("/{course_id}", response_model=CourseOut, summary="Update course")
@@ -395,6 +412,38 @@ async def list_course_modules(
         raise HTTPException(status_code=403, detail="Forbidden")
     mods = sb.table("modules").select("*").eq("course_id", course_id).order("id").execute()
     return mods.data or []
+
+
+@router.patch(
+    "/{course_id}/modules/{module_id}",
+    response_model=ModuleOut,
+    summary="Update module in course",
+)
+async def update_module(
+    course_id: int,
+    module_id: int,
+    payload: ModuleUpdate,
+    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer"])),
+):
+    sb = _sb()
+    crs = sb.table("courses").select("*").eq("id", course_id).limit(1).execute()
+    if not crs.data:
+        raise HTTPException(status_code=404, detail="Course not found")
+    if not _can_edit_course(user, crs.data[0]):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    mod = sb.table("modules").select("*").eq("id", module_id).limit(1).execute()
+    if not mod.data or mod.data[0].get("course_id") != course_id:
+        raise HTTPException(status_code=404, detail="Module not found")
+
+    data = payload.model_dump(exclude_unset=True)
+    if not data:
+        return mod.data[0]
+
+    updated = sb.table("modules").update(data).eq("id", module_id).execute()
+    if not updated.data:
+        raise HTTPException(status_code=500, detail="Failed to update module")
+    return updated.data[0]
 
 
 @router.delete(
