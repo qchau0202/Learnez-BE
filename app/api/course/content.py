@@ -131,6 +131,38 @@ def _ensure_material_access(sb, user: dict[str, Any], course: dict) -> None:
         raise HTTPException(status_code=403, detail="Forbidden")
 
 
+def _material_resource_type(row: dict[str, Any]) -> str:
+    md = row.get("metadata")
+    if isinstance(md, dict):
+        rt = md.get("resource_type")
+        if isinstance(rt, str) and rt.strip():
+            return rt.strip()
+    return "raw"
+
+
+def _material_resource_type_candidates(row: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    primary = _material_resource_type(row)
+    if primary:
+        out.append(primary)
+    mime = (row.get("mime_type") or "").lower()
+    if mime.startswith("image/"):
+        out.append("image")
+    elif mime.startswith("video/"):
+        out.append("video")
+    else:
+        out.append("raw")
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for rt in out:
+        key = rt.strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(rt)
+    return deduped or ["raw"]
+
+
 @router.get("/modules/{module_id}/materials", response_model=List[MaterialOut])
 async def list_module_materials(
     module_id: int,
@@ -172,11 +204,15 @@ async def download_material(
     file_url = row.get("file_url")
     public_id = row.get("cloudinary_public_id") or public_id_from_url(file_url)
     source_url: str | None = None
+    resource_type_candidates = _material_resource_type_candidates(row)
     if public_id:
-        try:
-            source_url = signed_download_url(public_id)
-        except Exception as exc:  # noqa: BLE001 - fall back to direct URL
-            logger.warning("signed_download_url failed for public_id=%s: %s", public_id, exc)
+        for rt in resource_type_candidates:
+            try:
+                source_url = signed_download_url(public_id, resource_type=rt)
+                if source_url:
+                    break
+            except Exception as exc:  # noqa: BLE001 - try next candidate
+                logger.warning("signed_download_url failed for public_id=%s (rt=%s): %s", public_id, rt, exc)
     if not source_url:
         source_url = file_url
     if not source_url:
@@ -215,9 +251,46 @@ async def download_material(
     if upstream.status_code >= 400:
         status_code = upstream.status_code
         await upstream.aclose()
-        await client.aclose()
-        logger.warning("download_material upstream returned %s for material %s", status_code, material_id)
-        raise HTTPException(status_code=502, detail=f"Storage returned {status_code}")
+        # Some legacy rows have mismatched resource_type metadata. Retry signed URL
+        # with alternate resource_type candidates before falling back to direct URL.
+        if public_id and source_url and source_url != file_url:
+            for rt in resource_type_candidates[1:]:
+                try:
+                    alt_url = signed_download_url(public_id, resource_type=rt)
+                    req_alt = client.build_request("GET", alt_url)
+                    upstream = await client.send(req_alt, stream=True)
+                except Exception:
+                    continue
+                if upstream.status_code < 400:
+                    break
+                await upstream.aclose()
+            else:
+                upstream = None
+            if upstream is not None and upstream.status_code < 400:
+                status_code = upstream.status_code
+
+        if status_code >= 400:
+            if file_url and source_url != file_url:
+                logger.warning(
+                    "signed material URL failed (%s) for material %s; retrying direct secure_url",
+                    status_code,
+                    material_id,
+                )
+                try:
+                    req2 = client.build_request("GET", file_url)
+                    upstream = await client.send(req2, stream=True)
+                except Exception as exc:  # noqa: BLE001
+                    await client.aclose()
+                    raise HTTPException(status_code=502, detail="Could not fetch file from storage") from exc
+                if upstream.status_code >= 400:
+                    bad = upstream.status_code
+                    await upstream.aclose()
+                    await client.aclose()
+                    raise HTTPException(status_code=502, detail=f"Storage returned {bad}")
+            else:
+                await client.aclose()
+                logger.warning("download_material upstream returned %s for material %s", status_code, material_id)
+                raise HTTPException(status_code=502, detail=f"Storage returned {status_code}")
 
     response_headers = {
         "Content-Disposition": content_disposition,
@@ -307,7 +380,7 @@ async def upload_content(
         try:
             public_id = uploaded.get("public_id")
             if public_id:
-                delete_public_id(public_id)
+                delete_public_id(public_id, resource_type=_material_resource_type(ins.data[0] if ins.data else {}))
         except Exception:
             pass
         raise HTTPException(status_code=500, detail="Failed to create material record")
@@ -357,6 +430,7 @@ async def update_material(
         filename = _safe_filename(file.filename or "file.bin")
         folder = f"learnez/courses/{course['id']}/modules/{module_id}"
         unique_name = f"{uuid4().hex}_{filename}"
+        old_resource_type = _material_resource_type(row)
         try:
             uploaded = upload_bytes(
                 file_bytes,
@@ -392,14 +466,14 @@ async def update_material(
     if not upd.data:
         if new_public_id:
             try:
-                delete_public_id(new_public_id)
+                delete_public_id(new_public_id, resource_type=_material_resource_type({"metadata": data.get("metadata")}))
             except Exception:
                 pass
         raise HTTPException(status_code=500, detail="Failed to update material")
 
     if new_path and old_public_id:
         try:
-            delete_public_id(old_public_id)
+            delete_public_id(old_public_id, resource_type=old_resource_type)
         except Exception:
             pass
 
@@ -423,10 +497,11 @@ async def delete_material(
         raise HTTPException(status_code=403, detail="Forbidden")
 
     old_public_id = row.get("cloudinary_public_id") or public_id_from_url(row.get("file_url"))
+    old_resource_type = _material_resource_type(row)
     sb.table("module_materials").delete().eq("id", material_id).execute()
     if old_public_id:
         try:
-            delete_public_id(old_public_id)
+            delete_public_id(old_public_id, resource_type=old_resource_type)
         except Exception:
             pass
     return Response(status_code=status.HTTP_204_NO_CONTENT)

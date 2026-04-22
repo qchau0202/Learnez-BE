@@ -39,12 +39,12 @@ def upload_bytes(
     filename: str,
     content_type: str | None = None,
 ) -> dict:
-    """Upload bytes as Cloudinary raw resource; returns uploader response."""
+    """Upload bytes as Cloudinary auto-detected resource; returns uploader response."""
     ensure_cloudinary_configured()
-    # `resource_type=raw` works for docs/images while avoiding video pipelines.
+    # Auto-detect keeps Cloudinary behavior consistent across files and dashboard visibility.
     return cloudinary.uploader.upload(
         payload,
-        resource_type="raw",
+        resource_type="auto",
         folder=folder,
         public_id=filename,
         overwrite=False,
@@ -55,28 +55,45 @@ def upload_bytes(
     )
 
 
-def delete_public_id(public_id: str) -> dict:
+def delete_public_id(public_id: str, *, resource_type: str | None = None) -> dict:
     ensure_cloudinary_configured()
-    return cloudinary.uploader.destroy(public_id, resource_type="raw", invalidate=True)
+    rt = (resource_type or "raw").strip() or "raw"
+    return cloudinary.uploader.destroy(public_id, resource_type=rt, invalidate=True)
 
 
-def signed_download_url(public_id: str, *, ttl_seconds: int = 3600) -> str:
-    """Return a short-lived signed delivery URL for a raw resource.
+def signed_download_url(
+    public_id: str,
+    *,
+    resource_type: str | None = None,
+    ttl_seconds: int = 3600,
+) -> str:
+    """Return a short-lived signed delivery URL.
 
     Works even if the account has "Restricted media types" enabled (PDF/ZIP/etc.),
     because the signature authenticates the request server-to-server.
     """
     ensure_cloudinary_configured()
     expires_at = int(time.time()) + max(60, ttl_seconds)
-    url, _options = cloudinary.utils.cloudinary_url(
-        public_id,
-        resource_type="raw",
-        type="upload",
-        secure=True,
-        sign_url=True,
-        expires_at=expires_at,
-    )
-    return url
+    rt = (resource_type or "raw").strip() or "raw"
+    # Prefer private_download_url for better compatibility with restricted delivery.
+    try:
+        return cloudinary.utils.private_download_url(
+            public_id,
+            resource_type=rt,
+            type="upload",
+            expires_at=expires_at,
+            attachment=False,
+        )
+    except Exception:
+        url, _options = cloudinary.utils.cloudinary_url(
+            public_id,
+            resource_type=rt,
+            type="upload",
+            secure=True,
+            sign_url=True,
+            expires_at=expires_at,
+        )
+        return url
 
 
 def public_id_from_url(file_url: str | None) -> str | None:
@@ -96,8 +113,8 @@ def public_id_from_url(file_url: str | None) -> str | None:
             tail = parts[1] if len(parts) > 1 else ""
         if not tail:
             return None
-        if "." in tail:
-            tail = tail.rsplit(".", 1)[0]
+        # Keep extension when present. In this project, uploaded public_id often
+        # includes the original extension; stripping it can break signed URLs.
         return tail
     except Exception:
         return None
