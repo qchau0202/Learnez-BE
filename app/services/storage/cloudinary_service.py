@@ -66,6 +66,7 @@ def signed_download_url(
     *,
     resource_type: str | None = None,
     ttl_seconds: int = 3600,
+    attachment: bool = False,
 ) -> str:
     """Return a short-lived signed delivery URL.
 
@@ -82,7 +83,7 @@ def signed_download_url(
             resource_type=rt,
             type="upload",
             expires_at=expires_at,
-            attachment=False,
+            attachment=attachment,
         )
     except Exception:
         url, _options = cloudinary.utils.cloudinary_url(
@@ -92,6 +93,7 @@ def signed_download_url(
             secure=True,
             sign_url=True,
             expires_at=expires_at,
+            attachment=attachment,
         )
         return url
 
