@@ -17,6 +17,36 @@ class StudentFileService:
     STUDENT_QUOTA_BYTES = STUDENT_QUOTA_MB * 1024 * 1024
 
     @staticmethod
+    async def _is_descendant_folder(folder_id: int, candidate_parent_id: int, student_id: UUID) -> bool:
+        """Return True when candidate_parent_id is inside folder_id's subtree."""
+        if folder_id == candidate_parent_id:
+            return True
+
+        supabase = StudentFileService._supabase()
+        current_id: Optional[int] = candidate_parent_id
+
+        while current_id is not None:
+            result = (
+                supabase.table("student_folders")
+                .select("id, parent_folder_id")
+                .eq("id", current_id)
+                .eq("student_id", str(student_id))
+                .eq("is_deleted", False)
+                .single()
+                .execute()
+            )
+
+            if not result.data:
+                break
+
+            if int(result.data.get("id")) == folder_id:
+                return True
+
+            current_id = result.data.get("parent_folder_id")
+
+        return False
+
+    @staticmethod
     def _cloudinary_resource_type_candidates(file_data: dict[str, Any]) -> list[str]:
         candidates: list[str] = []
 
@@ -183,8 +213,10 @@ class StudentFileService:
         await StudentFileService.get_folder(folder_id, student_id)
 
         # Prevent circular parent references
-        if parent_folder_id and parent_folder_id == folder_id:
-            raise ValueError("Cannot set folder as its own parent")
+        if parent_folder_id is not None and await StudentFileService._is_descendant_folder(
+            folder_id, parent_folder_id, student_id
+        ):
+            raise ValueError("Cannot move folder into itself or one of its descendants")
 
         update_data = {"updated_at": datetime.utcnow().isoformat()}
 
