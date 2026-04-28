@@ -71,6 +71,22 @@ bash BE/test/run_api_tests.sh materials_create_and_cleanup
 bash BE/test/run_api_tests.sh materials_create --delete-material-after
 ```
 
+### 5) Student File Management API
+
+```bash
+# Folder/file CRUD scenario run (keeps E2E data by default)
+bash BE/test/run_api_tests.sh student_files_create
+
+# Cleanup only (removes all E2E student files/folders)
+bash BE/test/run_api_tests.sh student_files_cleanup
+
+# Run scenarios then cleanup immediately
+bash BE/test/run_api_tests.sh student_files_create_and_cleanup
+
+# Run error/edge case tests
+BE/venv/bin/python BE/test/test_student_files_error_cases.py
+```
+
 ## Direct runner scripts (if needed)
 
 You can also call domain runners directly:
@@ -81,6 +97,9 @@ bash BE/test/run_assignments_tests.sh cleanup
 bash BE/test/run_assignments_tests.sh grading
 bash BE/test/run_assignments_tests.sh grading_cleanup
 bash BE/test/run_courses_tests.sh materials_cleanup
+bash BE/test/run_student_files_tests.sh create
+bash BE/test/run_student_files_tests.sh cleanup
+bash BE/test/run_student_files_tests.sh create_and_cleanup
 ```
 
 ## Environment variables

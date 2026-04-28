@@ -14,6 +14,9 @@
 #   bash BE/test/run_api_tests.sh grading_cleanup
 #   bash BE/test/run_api_tests.sh grading_create_and_cleanup
 #   bash BE/test/run_api_tests.sh courses_delete_all
+#   bash BE/test/run_api_tests.sh student_files_create
+#   bash BE/test/run_api_tests.sh student_files_cleanup
+#   bash BE/test/run_api_tests.sh student_files_create_and_cleanup
 #   bash BE/test/run_api_tests.sh notifications_create
 #   bash BE/test/run_api_tests.sh notifications_cleanup
 #   bash BE/test/run_api_tests.sh notifications_create_and_cleanup
@@ -66,6 +69,15 @@ case "$action" in
   courses_delete_all)
     exec bash "${ROOT}/test/run_courses_tests.sh" courses_delete_all "$@"
     ;;
+  student_files_create)
+    exec bash "${ROOT}/test/run_student_files_tests.sh" create "$@"
+    ;;
+  student_files_cleanup)
+    exec bash "${ROOT}/test/run_student_files_tests.sh" cleanup "$@"
+    ;;
+  student_files_create_and_cleanup)
+    exec bash "${ROOT}/test/run_student_files_tests.sh" create_and_cleanup "$@"
+    ;;
   notifications_create)
     exec "${ROOT}/venv/bin/python" "${ROOT}/test/test_notifications_flow.py" "$@"
     ;;
@@ -99,6 +111,9 @@ Actions:
   materials_cleanup
   materials_create_and_cleanup
   courses_delete_all
+  student_files_create
+  student_files_cleanup
+  student_files_create_and_cleanup
   notifications_create
   notifications_cleanup
   notifications_create_and_cleanup
