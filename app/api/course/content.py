@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Respon
 from fastapi.responses import StreamingResponse
 
 from app.core.database import get_supabase
-from app.core.dependencies import ROLE_MAP, require_roles
+from app.core.dependencies import ROLE_MAP, require_permissions, require_roles
 from app.models.course import MaterialOut
 from app.services.notifications.scenario_notifications import notify_material_uploaded
 from app.services.storage.cloudinary_service import (
@@ -166,7 +166,7 @@ def _material_resource_type_candidates(row: dict[str, Any]) -> list[str]:
 @router.get("/modules/{module_id}/materials", response_model=List[MaterialOut])
 async def list_module_materials(
     module_id: int,
-    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer", "Student"])),
+    user: dict[str, Any] = Depends(require_permissions(["material-02"])),
 ):
     """List materials of a module visible to the current role."""
     sb = _sb()
@@ -183,7 +183,7 @@ async def list_module_materials(
 async def download_material(
     material_id: int,
     inline: bool = Query(False, description="If true, stream with Content-Disposition: inline."),
-    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer", "Student"])),
+    user: dict[str, Any] = Depends(require_permissions(["material-02"])),
 ):
     """Stream a module material through the backend so access is always auth-checked.
 
@@ -322,7 +322,7 @@ async def upload_content(
     file: UploadFile = File(..., description="Binary file to upload."),
     name: str | None = Form(None, description="Display name (defaults from filename)."),
     description: str | None = Form(None, description="Optional description."),
-    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer"])),
+    user: dict[str, Any] = Depends(require_permissions(["material-01"])),
 ):
     """Upload material file to Cloudinary, then record metadata row (type derived from MIME)."""
     _require_cloudinary()
@@ -401,7 +401,7 @@ async def update_material(
     file: UploadFile | None = File(None, description="New file to replace the current one (optional)."),
     name: str | None = Form(None, description="Display name (optional)."),
     description: str | None = Form(None, description="Description (optional)."),
-    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer"])),
+    user: dict[str, Any] = Depends(require_permissions(["material-03"])),
 ):
     """Edit name/description and/or replace file (material_type follows MIME when file is replaced)."""
     _require_cloudinary()
@@ -483,7 +483,7 @@ async def update_material(
 @router.delete("/materials/{material_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete module material")
 async def delete_material(
     material_id: int,
-    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer"])),
+    user: dict[str, Any] = Depends(require_permissions(["material-04"])),
 ):
     _require_cloudinary()
     sb = _sb()

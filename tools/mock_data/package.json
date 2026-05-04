@@ -1,0 +1,16 @@
+{
+  "name": "learnez-mock-data",
+  "private": true,
+  "description": "Faker-based MongoDB / API simulation seeding for Learnez ML pipelines",
+  "scripts": {
+    "seed": "node simulation_seed.js",
+    "seed:mongo": "node simulation_seed.js --mode mongo",
+    "seed:api": "node simulation_seed.js --mode api"
+  },
+  "dependencies": {
+    "@faker-js/faker": "^9.4.0",
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.7",
+    "mongodb": "^6.12.0"
+  }
+}

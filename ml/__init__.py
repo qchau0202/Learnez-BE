@@ -1,1 +1,1 @@
-"""ML models and training scripts for e-learning AI features."""
+"""Learnez ML package (training + Mongo feature pipelines)."""

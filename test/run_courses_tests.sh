@@ -7,6 +7,8 @@
 #   bash BE/test/run_courses_tests.sh materials_create
 #   bash BE/test/run_courses_tests.sh materials_cleanup
 #   bash BE/test/run_courses_tests.sh materials_create_and_cleanup
+#   bash BE/test/run_courses_tests.sh course_permission_e2e
+#   bash BE/test/run_courses_tests.sh course_permission_cleanup
 #   bash BE/test/run_courses_tests.sh courses_delete_all
 #
 # Legacy aliases still supported: crud, seed, materials, materials_teardown, delete_all, all
@@ -40,6 +42,12 @@ case "$mode" in
   materials_create_and_cleanup|materials_teardown)
     exec "$PY" "${ROOT}/test/test_module_materials_crud.py" --teardown-after "$@"
     ;;
+  course_permission_e2e)
+    exec "$PY" "${ROOT}/test/test_course_permission_e2e.py" "$@"
+    ;;
+  course_permission_cleanup)
+    exec "$PY" "${ROOT}/test/test_course_permission_e2e.py" --cleanup-only "$@"
+    ;;
   courses_delete_all|delete_all)
     exec "$PY" "${ROOT}/test/test_courses_delete_all.py" --yes "$@"
     ;;
@@ -48,7 +56,7 @@ case "$mode" in
     "$PY" "${ROOT}/test/test_courses_seed.py"
     ;;
   *)
-    echo "Usage: $0 [courses_create|courses_seed_create|materials_create|materials_cleanup|materials_create_and_cleanup|courses_delete_all|all]" >&2
+    echo "Usage: $0 [courses_create|courses_seed_create|materials_create|materials_cleanup|materials_create_and_cleanup|course_permission_e2e|course_permission_cleanup|courses_delete_all|all]" >&2
     exit 1
     ;;
 esac

@@ -13,7 +13,7 @@ from typing import Any, List
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from app.core.database import get_supabase
-from app.core.dependencies import ROLE_MAP, require_roles
+from app.core.dependencies import ROLE_MAP, require_permissions, require_roles, user_has_permissions
 from app.services.assignment_cascade import delete_assignment_cascade
 from app.services.assessment.grading_service import auto_grade_submission
 from app.services.notifications.scenario_notifications import (
@@ -135,8 +135,8 @@ def _can_manage_assignment(user: dict[str, Any], sb, row: dict) -> bool:
     role = ROLE_MAP.get(user["role_id"])
     if role == "Admin":
         return True
-    if role == "Lecturer":
-        return _lecturer_owns_module(sb, user["user_id"], row.get("module_id"))
+    if role == "Lecturer" and _lecturer_owns_module(sb, user["user_id"], row.get("module_id")):
+        return user_has_permissions(user, ["assignment-03"])
     return False
 
 
@@ -280,7 +280,7 @@ def _can_edit_submission(user: dict[str, Any], sub: dict) -> bool:
 @router.post("/", response_model=AssignmentOut, status_code=status.HTTP_201_CREATED)
 async def create_assignment(
     payload: AssignmentCreate,
-    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer"])),
+    user: dict[str, Any] = Depends(require_permissions(["assignment-01"])),
 ):
     sb = _sb()
     role = ROLE_MAP.get(user["role_id"])
@@ -322,7 +322,7 @@ async def create_assignment(
 
 @router.get("/", response_model=List[AssignmentOut])
 async def list_assignments(
-    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer", "Student"])),
+    user: dict[str, Any] = Depends(require_permissions(["assignment-02"])),
 ):
     sb = _sb()
     role = ROLE_MAP.get(user["role_id"])
@@ -345,7 +345,7 @@ async def list_assignments(
 @router.get("/{assignment_id}", response_model=AssignmentDetailOut)
 async def get_assignment(
     assignment_id: int,
-    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer", "Student"])),
+    user: dict[str, Any] = Depends(require_permissions(["assignment-02"])),
 ):
     sb = _sb()
     row = _get_assignment(sb, assignment_id)
@@ -367,7 +367,7 @@ async def get_assignment(
 async def update_assignment(
     assignment_id: int,
     payload: AssignmentUpdate,
-    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer"])),
+    user: dict[str, Any] = Depends(require_permissions(["assignment-03"])),
 ):
     sb = _sb()
     row = _get_assignment(sb, assignment_id)
@@ -421,7 +421,7 @@ async def update_assignment(
 @router.delete("/{assignment_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_assignment(
     assignment_id: int,
-    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer"])),
+    user: dict[str, Any] = Depends(require_permissions(["assignment-04"])),
 ):
     sb = _sb()
     row = _get_assignment(sb, assignment_id)
@@ -441,7 +441,7 @@ async def delete_assignment(
 async def add_question(
     assignment_id: int,
     payload: QuestionCreate,
-    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer"])),
+    user: dict[str, Any] = Depends(require_permissions(["assignment-03"])),
 ):
     sb = _sb()
     row = _get_assignment(sb, assignment_id)
@@ -462,7 +462,7 @@ async def update_question(
     assignment_id: int,
     question_id: int,
     payload: QuestionUpdate,
-    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer"])),
+    user: dict[str, Any] = Depends(require_permissions(["assignment-03"])),
 ):
     sb = _sb()
     row = _get_assignment(sb, assignment_id)
@@ -502,7 +502,7 @@ async def update_question(
 async def delete_question(
     assignment_id: int,
     question_id: int,
-    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer"])),
+    user: dict[str, Any] = Depends(require_permissions(["assignment-03"])),
 ):
     sb = _sb()
     row = _get_assignment(sb, assignment_id)

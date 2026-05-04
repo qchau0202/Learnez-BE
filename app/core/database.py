@@ -1,6 +1,8 @@
 """MongoDB and Supabase database connections."""
 
-import os
+from __future__ import annotations
+
+from functools import lru_cache
 
 from motor.motor_asyncio import AsyncIOMotorClient
 from supabase import Client, create_client
@@ -20,10 +22,21 @@ def get_mongo_client() -> AsyncIOMotorClient:
     return AsyncIOMotorClient(settings["mongodb_uri"], **_MONGO_TLS)
 
 
-def get_mongo_db():
+def get_mongo_db(db_name: str | None = None):
     client = get_mongo_client()
     settings = get_settings()
-    return client[settings["mongodb_db"]]
+    selected_db = db_name or settings["mongodb_db"]
+    return client[selected_db]
+
+
+def get_mongo_raw_db():
+    settings = get_settings()
+    return get_mongo_db(settings["mongodb_raw_db"])
+
+
+def get_mongo_ai_db():
+    settings = get_settings()
+    return get_mongo_db(settings["mongodb_ai_db"])
 
 
 def get_supabase_client() -> Client | None:
