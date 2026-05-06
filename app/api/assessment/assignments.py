@@ -13,7 +13,7 @@ from typing import Any, List
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from app.core.database import get_supabase
-from app.core.dependencies import ROLE_MAP, require_roles
+from app.core.dependencies import ROLE_MAP, require_permissions, require_roles, user_has_permissions
 from app.services.assignment_cascade import delete_assignment_cascade
 from app.services.assessment.grading_service import auto_grade_submission
 from app.services.notifications.scenario_notifications import (
@@ -50,6 +50,31 @@ def _validate_due_and_hard_datetimes(due_raw: Any, hard_raw: Any) -> None:
             status_code=400,
             detail="hard_due_date must be on or after due_date (soft deadline).",
         )
+
+
+def _validate_duration_fields(duration_enabled: Any, duration: Any) -> None:
+    if not bool(duration_enabled):
+        return
+    if duration is None:
+        raise HTTPException(status_code=400, detail="duration is required when duration_enabled is true.")
+    try:
+        d = int(duration)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="duration must be an integer number of minutes.")
+    if d <= 0:
+        raise HTTPException(status_code=400, detail="duration must be greater than 0 minutes.")
+
+
+def _assert_lecturer_assignment_not_in_past(user: dict[str, Any], due_raw: Any, hard_raw: Any) -> None:
+    if ROLE_MAP.get(user.get("role_id")) != "Lecturer":
+        return
+    now = datetime.now(timezone.utc)
+    due_dt = parse_iso_datetime(due_raw) if due_raw is not None else None
+    hard_dt = parse_iso_datetime(hard_raw) if hard_raw is not None else None
+    if due_dt is not None and due_dt < now:
+        raise HTTPException(status_code=400, detail="Lecturer cannot create/update assignments with due_date in the past.")
+    if hard_dt is not None and hard_dt < now:
+        raise HTTPException(status_code=400, detail="Lecturer cannot create/update assignments with hard_due_date in the past.")
 
 
 def _assert_student_within_hard_deadline(user: dict[str, Any], assignment_row: dict) -> None:
@@ -135,8 +160,8 @@ def _can_manage_assignment(user: dict[str, Any], sb, row: dict) -> bool:
     role = ROLE_MAP.get(user["role_id"])
     if role == "Admin":
         return True
-    if role == "Lecturer":
-        return _lecturer_owns_module(sb, user["user_id"], row.get("module_id"))
+    if role == "Lecturer" and _lecturer_owns_module(sb, user["user_id"], row.get("module_id")):
+        return user_has_permissions(user, ["assignment-03"])
     return False
 
 
@@ -203,6 +228,32 @@ def _replace_submission_answers(
 
 def _submission_to_out(sb, sub: dict, with_answers: bool) -> dict:
     row = dict(sub)
+    student_uuid = row.get("student_id")
+    row["student_code"] = None
+    row["student_full_name"] = None
+    if student_uuid:
+        try:
+            u = (
+                sb.table("users")
+                .select("full_name")
+                .eq("user_id", student_uuid)
+                .limit(1)
+                .execute()
+            )
+            if u.data:
+                row["student_full_name"] = u.data[0].get("full_name")
+            sp = (
+                sb.table("student_profiles")
+                .select("student_id")
+                .eq("user_id", student_uuid)
+                .limit(1)
+                .execute()
+            )
+            if sp.data:
+                row["student_code"] = sp.data[0].get("student_id")
+        except Exception:
+            row["student_code"] = None
+            row["student_full_name"] = None
     row["answers"] = []
     if with_answers:
         ans = (
@@ -227,6 +278,37 @@ def _resolve_submit_student_id(user: dict[str, Any], payload: SubmissionCreate) 
             )
         return payload.student_id
     raise HTTPException(status_code=403, detail="Only Student or Admin may submit")
+
+
+def _submission_timing_patch(assignment_row: dict, *, status: str, elapsed_time: int | None, started_at: Any) -> dict[str, Any]:
+    patch: dict[str, Any] = {}
+    if status != "submitted":
+        return patch
+
+    now = datetime.now(timezone.utc)
+    patch["submitted_at"] = now.isoformat()
+
+    elapsed_sec = elapsed_time
+    if elapsed_sec is None and started_at is not None:
+        st = parse_iso_datetime(started_at)
+        if st is not None:
+            elapsed_sec = max(0, int((now - st).total_seconds()))
+    if elapsed_sec is not None:
+        patch["elapsed_time"] = int(elapsed_sec)
+
+    is_late = False
+    due = parse_iso_datetime(assignment_row.get("due_date"))
+    if due is not None and now > due:
+        is_late = True
+    if assignment_row.get("duration_enabled") and assignment_row.get("duration") and elapsed_sec is not None:
+        try:
+            limit_sec = int(assignment_row["duration"]) * 60
+            if elapsed_sec > limit_sec:
+                is_late = True
+        except (TypeError, ValueError):
+            pass
+    patch["is_late"] = is_late
+    return patch
 
 
 def _after_submit_notifications(sb, assignment_row: dict, student_id: str, sub_row: dict) -> None:
@@ -280,7 +362,7 @@ def _can_edit_submission(user: dict[str, Any], sub: dict) -> bool:
 @router.post("/", response_model=AssignmentOut, status_code=status.HTTP_201_CREATED)
 async def create_assignment(
     payload: AssignmentCreate,
-    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer"])),
+    user: dict[str, Any] = Depends(require_permissions(["assignment-01"])),
 ):
     sb = _sb()
     role = ROLE_MAP.get(user["role_id"])
@@ -290,6 +372,8 @@ async def create_assignment(
         raise HTTPException(status_code=404, detail="Module not found")
 
     _validate_due_and_hard_datetimes(payload.due_date, payload.hard_due_date)
+    _validate_duration_fields(payload.duration_enabled, payload.duration)
+    _assert_lecturer_assignment_not_in_past(user, payload.due_date, payload.hard_due_date)
 
     row = {
         "module_id": payload.module_id,
@@ -299,6 +383,8 @@ async def create_assignment(
         "hard_due_date": payload.hard_due_date.isoformat() if payload.hard_due_date else None,
         "total_score": payload.total_score,
         "is_graded": payload.is_graded,
+        "duration_enabled": payload.duration_enabled,
+        "duration": payload.duration,
         "uploaded_by": user["user_id"],
     }
     row = {k: v for k, v in row.items() if v is not None}
@@ -322,7 +408,7 @@ async def create_assignment(
 
 @router.get("/", response_model=List[AssignmentOut])
 async def list_assignments(
-    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer", "Student"])),
+    user: dict[str, Any] = Depends(require_permissions(["assignment-02"])),
 ):
     sb = _sb()
     role = ROLE_MAP.get(user["role_id"])
@@ -345,7 +431,7 @@ async def list_assignments(
 @router.get("/{assignment_id}", response_model=AssignmentDetailOut)
 async def get_assignment(
     assignment_id: int,
-    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer", "Student"])),
+    user: dict[str, Any] = Depends(require_permissions(["assignment-02"])),
 ):
     sb = _sb()
     row = _get_assignment(sb, assignment_id)
@@ -367,7 +453,7 @@ async def get_assignment(
 async def update_assignment(
     assignment_id: int,
     payload: AssignmentUpdate,
-    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer"])),
+    user: dict[str, Any] = Depends(require_permissions(["assignment-03"])),
 ):
     sb = _sb()
     row = _get_assignment(sb, assignment_id)
@@ -396,6 +482,10 @@ async def update_assignment(
     due_val = data["due_date"] if "due_date" in data else row.get("due_date")
     hard_val = data["hard_due_date"] if "hard_due_date" in data else row.get("hard_due_date")
     _validate_due_and_hard_datetimes(due_val, hard_val)
+    _assert_lecturer_assignment_not_in_past(user, due_val, hard_val)
+    duration_enabled_val = data["duration_enabled"] if "duration_enabled" in data else row.get("duration_enabled")
+    duration_val = data["duration"] if "duration" in data else row.get("duration")
+    _validate_duration_fields(duration_enabled_val, duration_val)
 
     if not data:
         return row
@@ -421,7 +511,7 @@ async def update_assignment(
 @router.delete("/{assignment_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_assignment(
     assignment_id: int,
-    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer"])),
+    user: dict[str, Any] = Depends(require_permissions(["assignment-04"])),
 ):
     sb = _sb()
     row = _get_assignment(sb, assignment_id)
@@ -441,7 +531,7 @@ async def delete_assignment(
 async def add_question(
     assignment_id: int,
     payload: QuestionCreate,
-    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer"])),
+    user: dict[str, Any] = Depends(require_permissions(["assignment-03"])),
 ):
     sb = _sb()
     row = _get_assignment(sb, assignment_id)
@@ -462,7 +552,7 @@ async def update_question(
     assignment_id: int,
     question_id: int,
     payload: QuestionUpdate,
-    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer"])),
+    user: dict[str, Any] = Depends(require_permissions(["assignment-03"])),
 ):
     sb = _sb()
     row = _get_assignment(sb, assignment_id)
@@ -502,7 +592,7 @@ async def update_question(
 async def delete_question(
     assignment_id: int,
     question_id: int,
-    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer"])),
+    user: dict[str, Any] = Depends(require_permissions(["assignment-03"])),
 ):
     sb = _sb()
     row = _get_assignment(sb, assignment_id)
@@ -556,7 +646,16 @@ async def create_or_resubmit(
             raise HTTPException(status_code=400, detail="Submission is already graded; cannot change")
         if not _can_edit_submission(user, sub):
             raise HTTPException(status_code=403, detail="Forbidden")
-        sb.table("assignment_submissions").update({"status": payload.status}).eq("id", sub["id"]).execute()
+        patch = {"status": payload.status}
+        patch.update(
+            _submission_timing_patch(
+                arow,
+                status=payload.status,
+                elapsed_time=payload.elapsed_time,
+                started_at=payload.started_at,
+            )
+        )
+        sb.table("assignment_submissions").update(patch).eq("id", sub["id"]).execute()
         _replace_submission_answers(sb, sub["id"], payload.answers, qids)
         _reset_submission_grading(sb, sub["id"])
         sub2 = auto_grade_submission(sb, arow, sub["id"])
@@ -571,6 +670,12 @@ async def create_or_resubmit(
                 "assignment_id": assignment_id,
                 "status": payload.status,
                 "is_corrected": False,
+                **_submission_timing_patch(
+                    arow,
+                    status=payload.status,
+                    elapsed_time=payload.elapsed_time,
+                    started_at=payload.started_at,
+                ),
             }
         )
         .execute()
@@ -682,6 +787,15 @@ async def update_submission(
 
     data = payload.model_dump(exclude_unset=True)
     answers = data.pop("answers", None)
+    if "status" in data:
+        data.update(
+            _submission_timing_patch(
+                arow,
+                status=str(data["status"]),
+                elapsed_time=payload.elapsed_time,
+                started_at=payload.started_at,
+            )
+        )
     if ROLE_MAP.get(user["role_id"]) == "Student":
         trivial = not answers and (not data or data == {"status": "draft"})
         if not trivial:

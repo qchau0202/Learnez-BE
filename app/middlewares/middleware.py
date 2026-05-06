@@ -18,6 +18,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "/health",
             "/api/iam/login",
             "/api/iam/bootstrap-admin",
+            "/api/activity/sim/ingest-batch",
             "/docs",
             "/redoc",
             "/openapi.json",

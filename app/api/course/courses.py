@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from app.core.database import get_supabase
-from app.core.dependencies import ROLE_MAP, require_roles
+from app.core.dependencies import ROLE_MAP, require_permissions, require_roles
 from app.models.course import (
     CourseAdminManagementOut,
     CourseCreate,
@@ -83,7 +83,7 @@ def _derive_course_end_date(start_date: Any, occurences: Any) -> str | None:
 @router.post("/", response_model=CourseOut, status_code=status.HTTP_201_CREATED, summary="Create course")
 async def create_course(
     payload: CourseCreate,
-    user: dict[str, Any] = Depends(require_roles(["Admin"])),
+    user: dict[str, Any] = Depends(require_permissions(["course-01"])),
 ):
     sb = _sb()
     row = {
@@ -169,7 +169,7 @@ def _enrich_courses_for_list(sb, courses: list[dict]) -> list[dict]:
 
 
 @router.get("/", response_model=List[CourseOut], summary="List courses by role visibility")
-async def list_courses(user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer", "Student"]))):
+async def list_courses(user: dict[str, Any] = Depends(require_permissions(["course-02"]))):
     sb = _sb()
     role = ROLE_MAP.get(user["role_id"])
     uid = user["user_id"]
@@ -411,7 +411,7 @@ async def get_course(
 async def update_course(
     course_id: int,
     payload: CourseUpdate,
-    user: dict[str, Any] = Depends(require_roles(["Admin", "Lecturer"])),
+    user: dict[str, Any] = Depends(require_permissions(["course-03"])),
 ):
     sb = _sb()
     res = sb.table("courses").select("*").eq("id", course_id).limit(1).execute()
@@ -452,7 +452,7 @@ async def update_course(
 @router.delete("/{course_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete course")
 async def delete_course(
     course_id: int,
-    user: dict[str, Any] = Depends(require_roles(["Admin"])),
+    user: dict[str, Any] = Depends(require_permissions(["course-04"])),
 ):
     sb = _sb()
     res = sb.table("courses").select("id").eq("id", course_id).limit(1).execute()

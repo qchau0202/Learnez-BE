@@ -10,6 +10,8 @@
 #   bash BE/test/run_api_tests.sh materials_create
 #   bash BE/test/run_api_tests.sh materials_cleanup
 #   bash BE/test/run_api_tests.sh materials_create_and_cleanup
+#   bash BE/test/run_api_tests.sh course_permission_e2e
+#   bash BE/test/run_api_tests.sh course_permission_cleanup
 #   bash BE/test/run_api_tests.sh grading_create
 #   bash BE/test/run_api_tests.sh grading_cleanup
 #   bash BE/test/run_api_tests.sh grading_create_and_cleanup
@@ -66,6 +68,12 @@ case "$action" in
   materials_create_and_cleanup)
     exec bash "${ROOT}/test/run_courses_tests.sh" materials_create_and_cleanup "$@"
     ;;
+  course_permission_e2e)
+    exec bash "${ROOT}/test/run_courses_tests.sh" course_permission_e2e "$@"
+    ;;
+  course_permission_cleanup)
+    exec bash "${ROOT}/test/run_courses_tests.sh" course_permission_cleanup "$@"
+    ;;
   courses_delete_all)
     exec bash "${ROOT}/test/run_courses_tests.sh" courses_delete_all "$@"
     ;;
@@ -110,6 +118,8 @@ Actions:
   materials_create
   materials_cleanup
   materials_create_and_cleanup
+  course_permission_e2e
+  course_permission_cleanup
   courses_delete_all
   student_files_create
   student_files_cleanup

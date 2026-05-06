@@ -1,0 +1,106 @@
+{
+  "run_id": "de687937e491",
+  "generated_at_utc": "2026-05-04T07:34:36.879896+00:00",
+  "since_weeks": 20,
+  "split": "group_user",
+  "random_state": 42,
+  "status": "completed",
+  "runs": [
+    {
+      "label_mode": "composite",
+      "model_path": "/Users/chou/Study/TDTU/DA-CNTT/523k0002_523k0021/source_code/Source/BE/ml/models/dropout_rf_composite.joblib",
+      "status": "ok",
+      "data_source": "REAL_MONGO",
+      "started_at_utc": "2026-05-04T07:34:36.879904+00:00",
+      "finished_at_utc": "2026-05-04T07:34:43.323056+00:00",
+      "duration_sec": 6.443,
+      "demo_data_used": false,
+      "fallback_reason": null,
+      "fallback_traceback": null,
+      "train_metrics": {
+        "classification_report": "              precision    recall  f1-score   support\n\n           0       0.99      1.00      1.00       905\n           1       0.97      0.53      0.69      2166\n           2       0.43      0.97      0.60       794\n\n    accuracy                           0.73      3865\n   macro avg       0.80      0.83      0.76      3865\nweighted avg       0.87      0.73      0.74      3865\n",
+        "roc_auc_ovr_weighted": 0.9258415314517106,
+        "label_mode": "composite",
+        "split": "time"
+      },
+      "evaluation": {
+        "rows": {
+          "train": 11840,
+          "test": 3965
+        },
+        "split_detail": {
+          "split": "group_user",
+          "train_users": 773,
+          "test_users": 257
+        },
+        "baselines": {
+          "dummy_majority": {
+            "accuracy": 0.4527112232030265,
+            "f1_macro": 0.20775462962962962
+          },
+          "dummy_stratified": {
+            "accuracy": 0.3442622950819672,
+            "f1_macro": 0.32210292724322404
+          }
+        },
+        "model_metrics": {
+          "accuracy": 0.932156368221942,
+          "f1_macro": 0.931474672395295,
+          "roc_auc_ovr_weighted": 0.9842236073398669
+        },
+        "smoke_predictions": [
+          {
+            "test_index": 149,
+            "y_true": 1,
+            "y_pred": 1,
+            "proba_by_class": {
+              "0": 0.0004947562769216766,
+              "1": 0.9987801856396282,
+              "2": 0.000725058083449947
+            }
+          },
+          {
+            "test_index": 1769,
+            "y_true": 1,
+            "y_pred": 1,
+            "proba_by_class": {
+              "0": 0.00030214203904212796,
+              "1": 0.998972799877508,
+              "2": 0.000725058083449947
+            }
+          },
+          {
+            "test_index": 3641,
+            "y_true": 0,
+            "y_pred": 0,
+            "proba_by_class": {
+              "0": 0.9976648306112732,
+              "1": 0.0009363530085619696,
+              "2": 0.0013988163801645762
+            }
+          },
+          {
+            "test_index": 720,
+            "y_true": 2,
+            "y_pred": 2,
+            "proba_by_class": {
+              "0": 0.006986559437701808,
+              "1": 0.004185050666198856,
+              "2": 0.9888283898960993
+            }
+          },
+          {
+            "test_index": 325,
+            "y_true": 1,
+            "y_pred": 1,
+            "proba_by_class": {
+              "0": 0.0004947562769216766,
+              "1": 0.9987801856396282,
+              "2": 0.000725058083449947
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
