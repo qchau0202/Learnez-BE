@@ -10,6 +10,10 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from time import perf_counter
+
+import asyncio
+from pymongo.errors import AutoReconnect, NetworkTimeout, ServerSelectionTimeoutError
 
 from app.core.database import get_mongo_ai_db, get_mongo_raw_db
 
@@ -34,6 +38,34 @@ class WeeklyFeatureAggregator:
     def __init__(self) -> None:
         self._raw_db = get_mongo_raw_db()
         self._db = get_mongo_ai_db()
+
+    async def ensure_weekly_feature_indexes(self) -> None:
+        """Migrate indexes for course-scoped weekly snapshots.
+
+        Old schema used unique (user_id, week_start).
+        New schema uses unique (user_id, course_id, week_start).
+        """
+        col = self._db["student_weekly_features"]
+        old_index_names: list[str] = []
+        async for idx in col.list_indexes():
+            keys = tuple((k, int(v)) for k, v in (idx.get("key") or {}).items())
+            if keys == (("user_id", 1), ("week_start", 1)):
+                name = idx.get("name")
+                if isinstance(name, str):
+                    old_index_names.append(name)
+        for name in old_index_names:
+            await col.drop_index(name)
+        await col.create_index(
+            [("user_id", 1), ("course_id", 1), ("week_start", 1)],
+            unique=True,
+            name="user_id_1_course_id_1_week_start_1",
+        )
+        await col.create_index([("week_start", 1), ("user_id", 1)], name="week_start_1_user_id_1")
+
+    async def ensure_raw_event_indexes(self) -> None:
+        """Ensure source event collections are indexed for week-range scans."""
+        for name in ("activity_events", "assessment_events", "attendance_events", "content_events"):
+            await self._raw_db[name].create_index([("event_time", 1)], name="event_time_1")
 
     async def load_window_events(self, week_start: datetime, week_end: datetime) -> list[dict[str, Any]]:
         collections = ["activity_events", "assessment_events", "attendance_events", "content_events"]
@@ -180,11 +212,20 @@ class WeeklyFeatureAggregator:
             return 0
         collection = self._db["student_weekly_features"]
         for snapshot in snapshots:
-            await collection.replace_one(
-                {"user_id": snapshot.user_id, "course_id": snapshot.course_id, "week_start": snapshot.week_start},
-                snapshot.model_dump(),
-                upsert=True,
-            )
+            attempts = 0
+            while True:
+                try:
+                    await collection.replace_one(
+                        {"user_id": snapshot.user_id, "course_id": snapshot.course_id, "week_start": snapshot.week_start},
+                        snapshot.model_dump(),
+                        upsert=True,
+                    )
+                    break
+                except (AutoReconnect, NetworkTimeout, ServerSelectionTimeoutError):
+                    attempts += 1
+                    if attempts >= 4:
+                        raise
+                    await asyncio.sleep(1.0 * attempts)
         return len(snapshots)
 
     async def persist_weekly_snapshots_for_range(self, start: datetime, end: datetime) -> int:
@@ -192,8 +233,19 @@ class WeeklyFeatureAggregator:
 
         cursor = week_bounds(start)[0]
         end_boundary = week_bounds(end)[0]
+        total_weeks = ((end_boundary - cursor).days // 7) + 1
         total = 0
+        week_idx = 1
         while cursor <= end_boundary:
-            total += await self.persist_weekly_snapshots(reference=cursor)
+            t0 = perf_counter()
+            print(f"[backfill] week {week_idx}/{total_weeks} start={cursor.date().isoformat()}")
+            written = await self.persist_weekly_snapshots(reference=cursor)
+            total += written
+            elapsed = perf_counter() - t0
+            print(
+                f"[backfill] week {week_idx}/{total_weeks} done start={cursor.date().isoformat()} "
+                f"written={written} elapsed_sec={elapsed:.2f}"
+            )
             cursor += timedelta(days=7)
+            week_idx += 1
         return total

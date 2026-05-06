@@ -107,8 +107,9 @@ async def bootstrap_student_daily_features(db) -> None:
 
 async def bootstrap_student_weekly_features(db) -> None:
     collection = db["student_weekly_features"]
-    await collection.create_index([("user_id", 1), ("week_start", 1)], unique=True)
+    await collection.create_index([("user_id", 1), ("course_id", 1), ("week_start", 1)], unique=True)
     await collection.create_index([("course_id", 1), ("week_start", 1)])
+    await collection.create_index([("week_start", 1), ("user_id", 1)])
     await collection.create_index([("updated_at", -1)])
 
 

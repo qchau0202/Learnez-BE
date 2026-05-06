@@ -19,9 +19,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from statistics import mean
 from typing import Any, Literal
+import asyncio
 import random
 
 from app.core.database import get_mongo_ai_db, get_mongo_raw_db
+from pymongo.errors import AutoReconnect, NetworkTimeout, ServerSelectionTimeoutError
 
 
 LabelMode = Literal["composite", "persona_multiclass", "persona_binary", "persona", "proxy"]
@@ -329,10 +331,33 @@ class TrainingDatasetBuilder:
     async def load_weekly_feature_docs(self, since_weeks: int = 12) -> list[dict[str, Any]]:
         end = datetime.now(timezone.utc)
         start = end - timedelta(weeks=since_weeks)
-        cursor = self._db["student_weekly_features"].find(
-            {"week_start": {"$gte": start, "$lt": end}}
-        ).sort([("week_start", 1), ("user_id", 1)])
-        return await cursor.to_list(length=None)
+        projection = {
+            "user_id": 1,
+            "course_id": 1,
+            "week_start": 1,
+            "week_end": 1,
+            "source_event_max_time": 1,
+            "features": 1,
+        }
+        # Avoid server-side sort on very large ranges; rows are normalized/sorted later
+        # in `clean_training_rows` before model training.
+        attempts = 0
+        while True:
+            try:
+                cursor = self._db["student_weekly_features"].find(
+                    {"week_start": {"$gte": start, "$lt": end}},
+                    projection=projection,
+                )
+                cursor = cursor.batch_size(2000)
+                docs: list[dict[str, Any]] = []
+                async for doc in cursor:
+                    docs.append(doc)
+                return docs
+            except (AutoReconnect, NetworkTimeout, ServerSelectionTimeoutError):
+                attempts += 1
+                if attempts >= 4:
+                    raise
+                await asyncio.sleep(1.0 * attempts)
 
     @staticmethod
     def _flatten_features(doc: dict[str, Any]) -> dict[str, Any]:

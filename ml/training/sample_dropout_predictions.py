@@ -67,7 +67,6 @@ async def _load_latest_rows(since_weeks: int, cap_docs: int = 60000) -> list[dic
     cursor = (
         db["student_weekly_features"]
         .find({"week_start": {"$gte": start, "$lt": end}})
-        .sort([("week_start", -1)])
     )
     docs = await cursor.to_list(length=cap_docs)
 

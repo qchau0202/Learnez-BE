@@ -68,25 +68,8 @@ def _effective_permission_names(user_id: str) -> set[str]:
             if name:
                 effective.add(str(name))
 
-    overrides = (
-        supabase.table("user_permissions")
-        .select("permission_id, is_allowed, permissions(permission_name)")
-        .eq("user_id", user_id)
-        .execute()
-    )
-    for row in overrides.data or []:
-        perm = row.get("permissions")
-        if not isinstance(perm, dict):
-            continue
-        name = perm.get("permission_name")
-        if not name:
-            continue
-        permission_name = str(name)
-        if row.get("is_allowed") is True:
-            effective.add(permission_name)
-        elif row.get("is_allowed") is False:
-            effective.discard(permission_name)
-
+    # Strict RBAC mode: effective permissions come only from role_permissions.
+    # Per-user overrides are intentionally ignored.
     return effective
 
 

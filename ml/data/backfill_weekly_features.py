@@ -55,6 +55,10 @@ async def _raw_event_time_bounds() -> tuple[datetime, datetime] | None:
 
 async def _run(args: argparse.Namespace) -> int:
     agg = WeeklyFeatureAggregator()
+    await agg.ensure_weekly_feature_indexes()
+    await agg.ensure_raw_event_indexes()
+    print("Ensured weekly feature indexes for (user_id, course_id, week_start).")
+    print("Ensured raw event indexes for event_time on source collections.")
 
     if args.use_raw_range:
         bounds = await _raw_event_time_bounds()

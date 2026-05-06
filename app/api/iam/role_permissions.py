@@ -11,6 +11,10 @@ from app.core.dependencies import require_roles
 router = APIRouter(prefix="/rbac", tags=["IAM - Role Permissions"])
 
 # Permission names are code-like for stable frontend mapping.
+# NOTE: The role mapping policy is strict for non-admin roles:
+# - Admin: full access
+# - Lecturer: teaching + grading + support views (no account mgmt, no course create/delete)
+# - Student: learning workflow + personal/report views (no authoring/grading)
 PERMISSION_CATALOG = [
     {"permission_id": 1, "permission_name": "course-01", "description": "Create course"},
     {"permission_id": 2, "permission_name": "course-02", "description": "View course"},
@@ -34,17 +38,35 @@ PERMISSION_CATALOG = [
 ]
 
 ADMIN_FULL_PERMISSION_IDS = [p["permission_id"] for p in PERMISSION_CATALOG]
-# Lecturer defaults:
-# - Can view/update courses
-# - Cannot create/delete courses
-# - Can manage internals: modules/materials/assignments
+# Lecturer defaults (strict to mapping table):
+# - Course lifecycle: view/update only (no create/delete)
+# - Manage materials / assignments
+# - Grading support
 LECTURER_DEFAULT_PERMISSION_IDS = [2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
 
-# Student defaults:
+# Student defaults (strict to mapping table):
 # - Read-only course/module/material access
-# - Assignment learning workflow access (view + submit/edit)
-# - No admin/lecturer authoring permissions
-STUDENT_DEFAULT_PERMISSION_IDS = [2, 6, 10, 14, 15]
+# - Assignment learning workflow access (view/submit handled by role-protected submission endpoints)
+# - No authoring / grading permissions
+STUDENT_DEFAULT_PERMISSION_IDS = [2, 6, 10, 14]
+
+# Non-admin roles must stay inside these sets even when admin edits roles/overrides.
+ROLE_POLICY_PERMISSION_IDS = {
+    "admin": set(ADMIN_FULL_PERMISSION_IDS),
+    "lecturer": set(LECTURER_DEFAULT_PERMISSION_IDS),
+    "student": set(STUDENT_DEFAULT_PERMISSION_IDS),
+}
+
+
+def _normalized_role_name(raw: str | None) -> str:
+    return (raw or "").strip().lower()
+
+
+def _policy_permission_ids_for_role(role_name: str) -> set[int]:
+    name = _normalized_role_name(role_name)
+    if "admin" in name:
+        return ROLE_POLICY_PERMISSION_IDS["admin"]
+    return ROLE_POLICY_PERMISSION_IDS.get(name, set())
 
 
 class PermissionOut(BaseModel):
@@ -58,12 +80,6 @@ class RoleOut(BaseModel):
     role_name: str
 
 
-class SaveRolePermissionsRequest(BaseModel):
-    permission_ids: List[int]
-
-    model_config = {"json_schema_extra": {"example": {"permission_ids": [1, 2, 5, 9, 13]}}}
-
-
 class AssignUserRoleRequest(BaseModel):
     role_id: int
 
@@ -75,21 +91,6 @@ class AssignUserRoleByEmailRequest(BaseModel):
     role_id: int
 
     model_config = {"json_schema_extra": {"example": {"email": "student1@email.com", "role_id": 3}}}
-
-
-class UserPermissionOverrideItem(BaseModel):
-    permission_id: int
-    is_allowed: bool
-
-
-class SaveUserPermissionOverridesRequest(BaseModel):
-    overrides: List[UserPermissionOverrideItem]
-
-    model_config = {
-        "json_schema_extra": {
-            "example": {"overrides": [{"permission_id": 14, "is_allowed": True}, {"permission_id": 16, "is_allowed": False}]}
-        }
-    }
 
 
 @router.get("/roles", response_model=List[RoleOut])
@@ -147,22 +148,12 @@ async def sync_permission_catalog(user: dict[str, Any] = Depends(require_roles([
         .execute()
     )
 
-    # Rebuild role-permission defaults:
-    # - Any role containing "admin" gets full permissions.
-    # - Lecturer gets lecturer default permissions.
+    # Rebuild role-permission defaults using strict policy.
     roles = supabase.table("roles").select("role_id, role_name").execute().data or []
     for role in roles:
         role_id = role["role_id"]
-        role_name = (role.get("role_name") or "").strip().lower()
-
-        if "admin" in role_name:
-            role_perm_ids = ADMIN_FULL_PERMISSION_IDS
-        elif role_name == "lecturer":
-            role_perm_ids = LECTURER_DEFAULT_PERMISSION_IDS
-        elif role_name == "student":
-            role_perm_ids = STUDENT_DEFAULT_PERMISSION_IDS
-        else:
-            role_perm_ids = []
+        role_name = _normalized_role_name(role.get("role_name"))
+        role_perm_ids = sorted(_policy_permission_ids_for_role(role_name))
 
         supabase.table("role_permissions").delete().eq("role_id", role_id).execute()
         if role_perm_ids:
@@ -195,43 +186,6 @@ async def get_role_permissions(
         if row.get("permissions"):
             permissions.append(row["permissions"])
     return permissions
-
-
-@router.put("/roles/{role_id}/permissions", status_code=status.HTTP_200_OK)
-async def save_role_permissions(
-    role_id: int,
-    payload: SaveRolePermissionsRequest,
-    user: dict[str, Any] = Depends(require_roles(["Admin"]))
-):
-    supabase = get_supabase(service_role=True)
-    role = supabase.table("roles").select("role_id, role_name").eq("role_id", role_id).limit(1).execute()
-    if not role.data:
-        raise HTTPException(status_code=404, detail="Role not found")
-
-    role_name = (role.data[0].get("role_name") or "").strip().lower()
-    permission_ids = payload.permission_ids
-    if "admin" in role_name:
-        permission_ids = ADMIN_FULL_PERMISSION_IDS
-
-    if permission_ids:
-        perms = (
-            supabase.table("permissions")
-            .select("permission_id")
-            .in_("permission_id", permission_ids)
-            .execute()
-        )
-        existing_ids = {p["permission_id"] for p in (perms.data or [])}
-        invalid = [pid for pid in permission_ids if pid not in existing_ids]
-        if invalid:
-            raise HTTPException(status_code=400, detail=f"Invalid permission_id(s): {invalid}")
-
-    supabase.table("role_permissions").delete().eq("role_id", role_id).execute()
-    if permission_ids:
-        supabase.table("role_permissions").insert(
-            [{"role_id": role_id, "permission_id": pid} for pid in permission_ids]
-        ).execute()
-
-    return {"message": "Role permissions saved", "role_id": role_id, "permission_ids": permission_ids}
 
 
 @router.put("/users/{user_id}/role", status_code=status.HTTP_200_OK)
@@ -368,170 +322,15 @@ async def get_user_permissions(
         if row.get("permissions"):
             default_permissions.append(row["permissions"])
 
-    effective_ids = {p["permission_id"] for p in default_permissions}
-    overrides = (
-        supabase.table("user_permissions")
-        .select("permission_id, is_allowed")
-        .eq("user_id", user_id)
-        .execute()
-    )
-    for row in (overrides.data or []):
-        pid = row["permission_id"]
-        if row.get("is_allowed") is True:
-            effective_ids.add(pid)
-        elif row.get("is_allowed") is False and pid in effective_ids:
-            effective_ids.remove(pid)
-
-    if not effective_ids:
+    role_effective_ids = {p["permission_id"] for p in default_permissions}
+    if not role_effective_ids:
         return []
 
     permissions = (
         supabase.table("permissions")
         .select("permission_id, permission_name, description")
-        .in_("permission_id", list(effective_ids))
+        .in_("permission_id", list(role_effective_ids))
         .order("permission_id")
         .execute()
     )
     return permissions.data or []
-
-
-@router.get("/users/{user_id}/permission-overrides", status_code=status.HTTP_200_OK)
-async def get_user_permission_overrides(
-    user_id: str,
-    user: dict[str, Any] = Depends(require_roles(["Admin"]))
-):
-    supabase = get_supabase(service_role=True)
-    target = (
-        supabase.table("users")
-        .select("user_id")
-        .eq("user_id", user_id)
-        .limit(1)
-        .execute()
-    )
-    if not target.data:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    rows = (
-        supabase.table("user_permissions")
-        .select("permission_id, is_allowed, changed_by")
-        .eq("user_id", user_id)
-        .order("permission_id")
-        .execute()
-    )
-    return {"user_id": user_id, "overrides": rows.data or []}
-
-
-def _role_default_permission_ids(supabase, role_id: int | None) -> set[int]:
-    if not role_id:
-        return set()
-    res = (
-        supabase.table("role_permissions")
-        .select("permission_id")
-        .eq("role_id", role_id)
-        .execute()
-    )
-    return {row["permission_id"] for row in (res.data or []) if row.get("permission_id") is not None}
-
-
-@router.put("/users/{user_id}/permission-overrides", status_code=status.HTTP_200_OK)
-async def save_user_permission_overrides(
-    user_id: str,
-    payload: SaveUserPermissionOverridesRequest,
-    user: dict[str, Any] = Depends(require_roles(["Admin"]))
-):
-    """
-    Persist only **deltas** from the user's current role defaults.
-
-    - Desired state comes from `overrides`: each row is the intended effective allow/deny for that permission.
-    - Rows that match the role default are **not** stored in `user_permissions` (avoids duplicate / noisy rows).
-    - Extra grants (allowed but not in role) → `is_allowed=True`.
-    - Revocations (denied but in role) → `is_allowed=False`.
-    """
-    supabase = get_supabase(service_role=True)
-    target = (
-        supabase.table("users")
-        .select("user_id, role_id")
-        .eq("user_id", user_id)
-        .limit(1)
-        .execute()
-    )
-    if not target.data:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    role_id = target.data[0].get("role_id")
-    role_perm_ids = _role_default_permission_ids(supabase, role_id)
-
-    permission_ids = [o.permission_id for o in payload.overrides]
-    if permission_ids:
-        existing = (
-            supabase.table("permissions")
-            .select("permission_id")
-            .in_("permission_id", permission_ids)
-            .execute()
-        )
-        existing_ids = {p["permission_id"] for p in (existing.data or [])}
-        invalid = [pid for pid in permission_ids if pid not in existing_ids]
-        if invalid:
-            raise HTTPException(status_code=400, detail=f"Invalid permission_id(s): {invalid}")
-
-    admin_user_id = user["user_id"]
-    delta_rows: list[dict[str, Any]] = []
-    for o in payload.overrides:
-        pid = o.permission_id
-        desired = bool(o.is_allowed)
-        in_role = pid in role_perm_ids
-        if desired and in_role:
-            continue
-        if not desired and not in_role:
-            continue
-        delta_rows.append(
-            {
-                "user_id": user_id,
-                "permission_id": pid,
-                "is_allowed": desired,
-                "changed_by": admin_user_id,
-            }
-        )
-
-    supabase.table("user_permissions").delete().eq("user_id", user_id).execute()
-    if delta_rows:
-        supabase.table("user_permissions").insert(delta_rows).execute()
-
-    return {
-        "message": "User permission overrides saved",
-        "user_id": user_id,
-        "changed_saved_by": admin_user_id,
-        "override_count": len(delta_rows),
-        "overrides": [
-            {
-                "permission_id": r["permission_id"],
-                "is_allowed": r["is_allowed"],
-                "changed_by": admin_user_id,
-            }
-            for r in delta_rows
-        ],
-    }
-
-
-@router.put("/users/permission-overrides/by-email", status_code=status.HTTP_200_OK)
-async def save_user_permission_overrides_by_email(
-    email: str,
-    payload: SaveUserPermissionOverridesRequest,
-    user: dict[str, Any] = Depends(require_roles(["Admin"]))
-):
-    supabase = get_supabase(service_role=True)
-    target = (
-        supabase.table("users")
-        .select("user_id")
-        .eq("email", email)
-        .limit(1)
-        .execute()
-    )
-    if not target.data:
-        raise HTTPException(status_code=404, detail="User not found by email")
-
-    return await save_user_permission_overrides(
-        user_id=target.data[0]["user_id"],
-        payload=payload,
-        user=user,
-    )

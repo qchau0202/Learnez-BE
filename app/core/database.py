@@ -17,9 +17,19 @@ except ImportError:
     _MONGO_TLS = {}
 
 
+@lru_cache(maxsize=1)
 def get_mongo_client() -> AsyncIOMotorClient:
     settings = get_settings()
-    return AsyncIOMotorClient(settings["mongodb_uri"], **_MONGO_TLS)
+    return AsyncIOMotorClient(
+        settings["mongodb_uri"],
+        maxPoolSize=50,
+        minPoolSize=1,
+        serverSelectionTimeoutMS=20_000,
+        connectTimeoutMS=20_000,
+        socketTimeoutMS=30_000,
+        retryWrites=True,
+        **_MONGO_TLS,
+    )
 
 
 def get_mongo_db(db_name: str | None = None):

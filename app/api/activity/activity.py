@@ -9,7 +9,7 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.api.deps import DbDep
+from app.api.deps import RawDbDep
 
 router = APIRouter(prefix="/activity", tags=["Activity Tracking"])
 
@@ -43,7 +43,7 @@ class ActivityLogBody(BaseModel):
 
 
 @router.post("/log")
-async def log_activity(db: DbDep, body: ActivityLogBody):
+async def log_activity(db: RawDbDep, body: ActivityLogBody):
     """Log user activity into Mongo raw `activity_events`."""
     event_type = (body.event_type or "").strip()
     if event_type not in _ALLOWED_EVENT_TYPES:
@@ -86,7 +86,7 @@ async def log_activity(db: DbDep, body: ActivityLogBody):
 
 @router.get("/{user_id}")
 async def get_user_activity(
-    db: DbDep,
+    db: RawDbDep,
     user_id: str,
     since_days: int = Query(default=30, ge=1, le=120),
 ):

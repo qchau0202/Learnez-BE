@@ -37,16 +37,17 @@ class AssignmentCreate(BaseModel):
     module_id: int
     title: str = Field(min_length=1, max_length=500)
     description: Optional[str] = Field(default=None, max_length=5000)
-    due_date: Optional[datetime] = Field(
-        None,
+    due_date: datetime = Field(
         description="Soft deadline (overdue reminders). Late submission allowed after this unless hard_due_date applies.",
     )
     hard_due_date: Optional[datetime] = Field(
         None,
         description="If set, final student submission cutoff. Must be on or after due_date when both are set.",
     )
-    total_score: Optional[float] = None
+    total_score: float = Field(gt=0)
     is_graded: bool = False
+    duration_enabled: bool = False
+    duration: Optional[int] = Field(default=None, ge=1, description="Duration in minutes when duration_enabled=true.")
     questions: Optional[List[QuestionCreate]] = None
 
     model_config = {
@@ -84,6 +85,8 @@ class AssignmentUpdate(BaseModel):
     hard_due_date: Optional[datetime] = None
     total_score: Optional[float] = None
     is_graded: Optional[bool] = None
+    duration_enabled: Optional[bool] = None
+    duration: Optional[int] = Field(default=None, ge=1)
 
     model_config = {
         "json_schema_extra": {
@@ -107,6 +110,8 @@ class AssignmentOut(BaseModel):
     title: Optional[str] = None
     is_graded: Optional[bool] = None
     uploaded_by: Optional[str] = None
+    duration_enabled: Optional[bool] = False
+    duration: Optional[int] = None
 
     class Config:
         from_attributes = True
@@ -127,6 +132,8 @@ class SubmissionCreate(BaseModel):
     student_id: Optional[str] = None
     answers: List[AnswerIn] = Field(default_factory=list)
     status: Literal["draft", "submitted"] = "submitted"
+    elapsed_time: Optional[int] = Field(default=None, ge=0)
+    started_at: Optional[datetime] = None
 
     model_config = {
         "json_schema_extra": {
@@ -144,6 +151,8 @@ class SubmissionCreate(BaseModel):
 class SubmissionUpdate(BaseModel):
     answers: Optional[List[AnswerIn]] = None
     status: Optional[Literal["draft", "submitted"]] = None
+    elapsed_time: Optional[int] = Field(default=None, ge=0)
+    started_at: Optional[datetime] = None
 
     model_config = {
         "json_schema_extra": {
@@ -207,12 +216,17 @@ class SubmissionOut(BaseModel):
     id: int
     created_at: datetime
     student_id: Optional[str] = None
+    student_code: Optional[str] = None
+    student_full_name: Optional[str] = None
     assignment_id: Optional[int] = None
     status: Optional[str] = None
     is_corrected: Optional[bool] = None
     final_score: Optional[float] = None
     feedback: Optional[str] = None
     risk_score: Optional[float] = None
+    submitted_at: Optional[datetime] = None
+    is_late: Optional[bool] = None
+    elapsed_time: Optional[int] = None
     answers: List[SubmissionAnswerOut] = Field(default_factory=list)
 
     class Config:

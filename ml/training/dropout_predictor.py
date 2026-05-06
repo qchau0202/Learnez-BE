@@ -32,7 +32,7 @@ class DropoutRiskTrainer:
 
     def __init__(self, model_path: str | Path | None = None) -> None:
         self.dataset_builder = TrainingDatasetBuilder()
-        self.model_path = Path(model_path or Path(__file__).resolve().parents[1] / "models" / "dropout_rf.joblib")
+        self.model_path = Path(model_path or Path(__file__).resolve().parents[1] / "models" / "dropout_rf_composite.joblib")
         self.model_path.parent.mkdir(parents=True, exist_ok=True)
 
     @staticmethod

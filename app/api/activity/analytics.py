@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from joblib import load as joblib_load
 from pydantic import BaseModel, Field
 
-from app.api.deps import DbDep
+from app.api.deps import AiDbDep
 from app.core.database import get_supabase
 from app.core.dependencies import ROLE_MAP
 from ml.training.dataset_builder import FEATURE_COLUMNS
@@ -88,7 +88,7 @@ def _load_model():
     return joblib_load(_MODEL_PATH)
 
 
-async def _load_weekly_feature_rows(db: DbDep, student_id: str, *, since_weeks: int) -> list[dict[str, Any]]:
+async def _load_weekly_feature_rows(db: AiDbDep, student_id: str, *, since_weeks: int) -> list[dict[str, Any]]:
     end = datetime.now(timezone.utc)
     start = end - timedelta(weeks=since_weeks)
     cursor = (
@@ -102,6 +102,10 @@ async def _load_weekly_feature_rows(db: DbDep, student_id: str, *, since_weeks: 
 def _authorized_course_scope(user: dict[str, Any]) -> tuple[set[int] | None, str]:
     """Return (allowed_course_ids_or_none_for_all, role_name)."""
     role_name = ROLE_MAP.get(user.get("role_id"))
+    if not role_name:
+        role_raw = str(user.get("role") or "").strip().lower()
+        role_map = {"admin": "Admin", "lecturer": "Lecturer", "student": "Student"}
+        role_name = role_map.get(role_raw)
     if role_name == "Admin":
         return None, role_name
     supabase = get_supabase(service_role=True)
@@ -118,7 +122,7 @@ def _authorized_course_scope(user: dict[str, Any]) -> tuple[set[int] | None, str
 
 
 async def _load_latest_rows_for_many_users(
-    db: DbDep,
+    db: AiDbDep,
     *,
     since_weeks: int,
     max_users: int,
@@ -140,14 +144,17 @@ async def _load_latest_rows_for_many_users(
         .sort([("week_start", -1)])
         .to_list(length=max(max_users * 8, 1000))
     )
-    latest_by_user: dict[str, dict[str, Any]] = {}
+    latest_by_user_course: dict[tuple[str, int | None], dict[str, Any]] = {}
     for d in docs:
         uid = str(d.get("user_id") or "").strip()
-        if uid and uid not in latest_by_user:
-            latest_by_user[uid] = d
-            if len(latest_by_user) >= max_users:
+        if uid:
+            key = (uid, d.get("course_id"))
+            if key in latest_by_user_course:
+                continue
+            latest_by_user_course[key] = d
+            if len(latest_by_user_course) >= max_users:
                 break
-    return list(latest_by_user.values())
+    return list(latest_by_user_course.values())
 
 
 def _avg_feature(rows: list[dict[str, Any]], feature_name: str) -> float:
@@ -210,7 +217,7 @@ def _score_competency(rows: list[dict[str, Any]]) -> list[CompetencyDimension]:
 
 @router.get("/overview", response_model=AnalyticsOverviewResponse)
 async def get_analytics_overview(
-    db: DbDep,
+    db: AiDbDep,
     request: Request,
     since_weeks: int = Query(default=8, ge=2, le=30),
     max_users: int = Query(default=1000, ge=20, le=5000),
@@ -231,7 +238,15 @@ async def get_analytics_overview(
         course_id=course_id,
     )
     if not rows:
-        raise HTTPException(status_code=404, detail="No student_weekly_features rows found for requested window.")
+        return AnalyticsOverviewResponse(
+            students_considered=0,
+            risk_distribution={"low": 0, "medium": 0, "high": 0},
+            avg_risk_score=0.0,
+            avg_attendance_rate=0.0,
+            avg_score_30d=0.0,
+            generated_at_utc=datetime.now(timezone.utc),
+            data_source="REAL_MONGO",
+        )
 
     risk_dist = {"low": 0, "medium": 0, "high": 0}
     scores: list[float] = []
@@ -259,7 +274,7 @@ async def get_analytics_overview(
 
 @router.get("/students", response_model=list[StudentRiskCard])
 async def list_student_risk_cards(
-    db: DbDep,
+    db: AiDbDep,
     request: Request,
     since_weeks: int = Query(default=8, ge=2, le=30),
     limit: int = Query(default=20, ge=1, le=100),
@@ -281,7 +296,7 @@ async def list_student_risk_cards(
         course_id=course_id,
     )
     if not rows:
-        raise HTTPException(status_code=404, detail="No student_weekly_features rows found for requested window.")
+        return []
 
     selected = rows[offset : offset + limit]
     out: list[StudentRiskCard] = []
@@ -307,7 +322,7 @@ async def list_student_risk_cards(
 
 @router.get("/{student_id}/competency", response_model=CompetencyResponse)
 async def get_competency_analysis(
-    db: DbDep,
+    db: AiDbDep,
     request: Request,
     student_id: str,
     since_weeks: int = Query(default=8, ge=2, le=30),
@@ -348,7 +363,7 @@ async def get_competency_analysis(
 
 @router.get("/{student_id}/learning-path", response_model=LearningPathResponse)
 async def get_learning_path(
-    db: DbDep,
+    db: AiDbDep,
     request: Request,
     student_id: str,
     since_weeks: int = Query(default=8, ge=2, le=30),
@@ -405,7 +420,7 @@ async def get_learning_path(
 
 @router.get("/{student_id}/dropout-risk", response_model=DropoutRiskResponse)
 async def get_dropout_risk(
-    db: DbDep,
+    db: AiDbDep,
     request: Request,
     student_id: str,
     course_id: int | None = Query(default=None, ge=1),
