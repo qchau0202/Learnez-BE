@@ -133,17 +133,13 @@ async def list_notifications(
             detail="recipient_id may only target another user when using an Admin account",
         )
 
+    # Strict per-recipient scoping. Lecturers no longer see notifications
+    # addressed to *students* of their courses — they can drive into a course
+    # explicitly when they need that view, but the notification feed is
+    # personal mail. Admins can override via ?recipient_id= for inspections.
     if role == "Admin":
-        if recipient_id:
-            q = q.eq("recipient_id", recipient_id)
-    elif role == "Lecturer":
-        uid = user["user_id"]
-        cids = _lecturer_course_ids(sb, uid)
-        if cids:
-            in_list = ",".join(str(c) for c in cids)
-            q = q.or_(f"recipient_id.eq.{uid},course_id.in.({in_list})")
-        else:
-            q = q.eq("recipient_id", uid)
+        target_recipient = recipient_id or user["user_id"]
+        q = q.eq("recipient_id", target_recipient)
     else:
         q = q.eq("recipient_id", user["user_id"])
 

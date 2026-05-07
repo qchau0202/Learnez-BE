@@ -283,10 +283,15 @@ def main(argv: list[str] | None = None) -> int:
         print("lecturer create", sc2, file=sys.stderr)
         return 1
 
-    # Lecturer list includes course notification for their course
+    # Lecturer list is strictly per-recipient: they should NOT see notifications
+    # addressed to their students (even for their own courses). Lecturers can
+    # still mutate course-owned notifications via the explicit endpoints below.
     ll = requests.get(f"{BASE}/api/notifications/", headers=auth_bearer(lec_t), timeout=30)
-    if ll.status_code != 200 or not any(x.get("id") == n2_id for x in ll.json()):
-        print("lecturer list should include course notification", ll.status_code, file=sys.stderr)
+    if ll.status_code != 200:
+        print("lecturer list status", ll.status_code, file=sys.stderr)
+        return 1
+    if any(x.get("id") == n2_id for x in ll.json()):
+        print("lecturer list should NOT include notifications addressed to students", file=sys.stderr)
         return 1
 
     # Lecturer full PUT on course notification
