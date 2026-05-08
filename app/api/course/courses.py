@@ -1,12 +1,15 @@
 """Course CRUD — aligned with public.courses (Supabase)."""
 
+import io
 import logging
-from datetime import timedelta
+from datetime import date as _date_type, datetime as _datetime_type, timedelta
 from typing import Any, List
+
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 
 from app.core.database import get_supabase
 from app.core.dependencies import ROLE_MAP, require_permissions, require_roles
@@ -460,6 +463,263 @@ async def delete_course(
         raise HTTPException(status_code=404, detail="Course not found")
     sb.table("courses").delete().eq("id", course_id).execute()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# --------------------------------------------------------------------------- #
+# Bulk import (CSV / XLSX)
+# --------------------------------------------------------------------------- #
+
+
+def _coerce_str(value: Any) -> str | None:
+    """Strip whitespace and return ``None`` for empty / NaN-like values."""
+    if value is None:
+        return None
+    if isinstance(value, float):
+        # pandas may pass NaN through fillna("") only for object columns; numeric
+        # NaNs survive. Check explicitly to keep import resilient.
+        try:
+            if pd.isna(value):
+                return None
+        except Exception:
+            pass
+    text = str(value).strip()
+    if not text or text.lower() == "nan":
+        return None
+    return text
+
+
+def _coerce_int(value: Any) -> int | None:
+    raw = _coerce_str(value)
+    if raw is None:
+        return None
+    try:
+        return int(float(raw))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail=f"Invalid integer value: {value}")
+
+
+def _coerce_bool(value: Any, *, default: bool = False) -> bool:
+    raw = _coerce_str(value)
+    if raw is None:
+        return default
+    return raw.lower() in {"true", "1", "yes", "y", "t"}
+
+
+def _coerce_date_iso(value: Any) -> str | None:
+    raw = _coerce_str(value)
+    if raw is None:
+        return None
+    if isinstance(value, _datetime_type):
+        return value.date().isoformat()
+    if isinstance(value, _date_type):
+        return value.isoformat()
+    # Accept "YYYY-MM-DD" and ISO datetimes.
+    try:
+        return _date_type.fromisoformat(raw[:10]).isoformat()
+    except ValueError:
+        # Fall through to pandas — it handles "2026/09/01" etc.
+        try:
+            ts = pd.to_datetime(raw, errors="raise")
+            return ts.date().isoformat()
+        except Exception:
+            raise HTTPException(
+                status_code=400, detail=f"Invalid date value (expected YYYY-MM-DD): {value}"
+            )
+
+
+@router.post(
+    "/import",
+    status_code=status.HTTP_200_OK,
+    summary="Bulk import courses via CSV/XLSX",
+)
+async def import_courses(
+    sheet: UploadFile = File(..., description="CSV/XLSX with course columns"),
+    user: dict[str, Any] = Depends(require_roles(["Admin"])),
+):
+    """Bulk-create courses from a spreadsheet.
+
+    Required column: ``title``. All other columns map to the same fields as
+    ``POST /courses``. For convenience the sheet also accepts:
+
+    * ``lecturer_email`` — resolved against ``users.email`` to fill
+      ``lecturer_id`` when only the email is known to the operator.
+    * ``department_name`` (+ optional ``faculty_name``) — resolved against
+      ``departments.name`` to fill ``from_department``.
+
+    Returns ``{total, created, failed, errors[]}`` (mirrors the user
+    importer) so the front-end can show one summary toast.
+    """
+    filename = (sheet.filename or "").lower()
+    try:
+        raw = await sheet.read()
+        if filename.endswith(".csv"):
+            df = pd.read_csv(io.BytesIO(raw))
+        elif filename.endswith(".xlsx") or filename.endswith(".xls"):
+            df = pd.read_excel(io.BytesIO(raw))
+        else:
+            raise HTTPException(status_code=400, detail="Only .csv, .xlsx, .xls are supported")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid sheet file: {e}")
+
+    if "title" not in df.columns:
+        raise HTTPException(status_code=400, detail="Missing required column: title")
+
+    sb = _sb()
+
+    # Pre-load lookup tables once so we don't hit Supabase per row.
+    dept_by_name: dict[tuple[str, str | None], int] = {}
+    try:
+        dep_rows = (
+            sb.table("departments")
+            .select("id, name, from_faculty")
+            .execute()
+            .data
+            or []
+        )
+        fac_rows = (
+            sb.table("faculties").select("id, name").execute().data or []
+        )
+        fac_name_by_id = {int(f["id"]): str(f.get("name") or "") for f in fac_rows}
+        for d in dep_rows:
+            if d.get("id") is None or not d.get("name"):
+                continue
+            dname = str(d["name"]).strip().lower()
+            fid = d.get("from_faculty")
+            fname = (fac_name_by_id.get(int(fid)).lower() if fid is not None else None)
+            dept_by_name[(dname, fname)] = int(d["id"])
+            # Also index without faculty for fuzzy lookups when the sheet
+            # only carries department_name.
+            dept_by_name.setdefault((dname, None), int(d["id"]))
+    except Exception as exc:
+        logger.warning("import_courses: department lookup failed: %s", exc)
+
+    lecturer_id_by_email: dict[str, str] = {}
+
+    def _resolve_lecturer_id(email_or_id: str | None) -> str | None:
+        if not email_or_id:
+            return None
+        if "@" not in email_or_id:
+            # Treat as a UUID-style lecturer_id; trust the operator.
+            return email_or_id
+        email_key = email_or_id.lower()
+        if email_key in lecturer_id_by_email:
+            return lecturer_id_by_email[email_key]
+        try:
+            res = (
+                sb.table("users")
+                .select("user_id, email, role_id")
+                .ilike("email", email_or_id)
+                .limit(1)
+                .execute()
+            )
+            row = (res.data or [None])[0]
+        except Exception as exc:
+            logger.warning("import_courses: lecturer lookup failed for %s: %s", email_or_id, exc)
+            return None
+        if not row:
+            return None
+        if row.get("role_id") not in (1, 2):
+            # Not a staff account — surface the error to the row.
+            raise HTTPException(
+                status_code=400,
+                detail=f"User {email_or_id} is not a lecturer/admin",
+            )
+        uid = str(row["user_id"])
+        lecturer_id_by_email[email_key] = uid
+        return uid
+
+    def _resolve_department_id(department_name: str | None, faculty_name: str | None) -> int | None:
+        if not department_name:
+            return None
+        dname = department_name.strip().lower()
+        if faculty_name:
+            fname = faculty_name.strip().lower()
+            if (dname, fname) in dept_by_name:
+                return dept_by_name[(dname, fname)]
+        return dept_by_name.get((dname, None))
+
+    created = 0
+    failed = 0
+    errors: list[dict[str, Any]] = []
+    inserted_rows: list[dict[str, Any]] = []
+    for idx, row in df.fillna("").iterrows():
+        try:
+            title = _coerce_str(row.get("title"))
+            if not title:
+                raise HTTPException(status_code=400, detail="Title is required")
+
+            # Resolve lecturer (prefer explicit lecturer_id, fall back to email).
+            lecturer_id = _coerce_str(row.get("lecturer_id"))
+            if not lecturer_id:
+                lecturer_id = _resolve_lecturer_id(_coerce_str(row.get("lecturer_email")))
+
+            # Resolve department (prefer explicit from_department).
+            from_department = _coerce_int(row.get("from_department"))
+            if from_department is None:
+                from_department = _resolve_department_id(
+                    _coerce_str(row.get("department_name")),
+                    _coerce_str(row.get("faculty_name")),
+                )
+
+            payload = {
+                "title": title,
+                "description": _coerce_str(row.get("description")) or "",
+                "course_code": _coerce_str(row.get("course_code")),
+                "semester": _coerce_int(row.get("semester")),
+                "academic_year": _coerce_str(row.get("academic_year")),
+                "class_room": _coerce_str(row.get("class_room")),
+                "course_occurences": _coerce_int(row.get("course_occurences")),
+                "course_session": _coerce_str(row.get("course_session")),
+                "course_session_date": _coerce_str(row.get("course_session_date")),
+                "course_session_duration": _coerce_int(row.get("course_session_duration")),
+                "course_start_date": _coerce_date_iso(row.get("course_start_date")),
+                "course_end_date": _coerce_date_iso(row.get("course_end_date")),
+                "lecturer_id": lecturer_id,
+                "from_department": from_department,
+                "is_complete": _coerce_bool(row.get("is_complete"), default=False),
+                "created_by": user["user_id"],
+            }
+
+            # Validate semester/duration/occurences ranges (mirror Pydantic limits).
+            if payload["semester"] is not None and not (1 <= payload["semester"] <= 4):
+                raise HTTPException(status_code=400, detail="semester must be in 1..4")
+            if payload["course_occurences"] is not None and not (1 <= payload["course_occurences"] <= 60):
+                raise HTTPException(status_code=400, detail="course_occurences must be in 1..60")
+            if payload["course_session_duration"] is not None and not (
+                0 <= payload["course_session_duration"] <= 1440
+            ):
+                raise HTTPException(
+                    status_code=400, detail="course_session_duration must be in 0..1440"
+                )
+
+            if payload["course_end_date"] is None and payload["course_start_date"]:
+                derived = _derive_course_end_date(
+                    payload["course_start_date"], payload["course_occurences"]
+                )
+                if derived:
+                    payload["course_end_date"] = derived
+
+            insert_row = {k: v for k, v in payload.items() if v is not None}
+            res = sb.table("courses").insert(insert_row).execute()
+            if not res.data:
+                raise HTTPException(status_code=500, detail="Insert returned no row")
+            inserted_rows.append(res.data[0])
+            created += 1
+        except HTTPException as e:
+            failed += 1
+            errors.append({"row": int(idx) + 2, "error": str(e.detail)})
+        except Exception as e:
+            failed += 1
+            errors.append({"row": int(idx) + 2, "error": str(e)})
+
+    return {
+        "total": int(len(df.index)),
+        "created": created,
+        "failed": failed,
+        "errors": errors[:30],
+    }
 
 
 @router.post(
