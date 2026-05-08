@@ -1,0 +1,1 @@
+"""Cross-domain search endpoints."""

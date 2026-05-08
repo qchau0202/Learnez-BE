@@ -9,7 +9,7 @@ from urllib.parse import quote
 from uuid import uuid4
 
 import httpx
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 
 from app.core.database import get_supabase
@@ -319,6 +319,7 @@ async def download_material(
 )
 async def upload_content(
     module_id: int,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(..., description="Binary file to upload."),
     name: str | None = Form(None, description="Display name (defaults from filename)."),
     description: str | None = Form(None, description="Optional description."),
@@ -385,7 +386,8 @@ async def upload_content(
             pass
         raise HTTPException(status_code=500, detail="Failed to create material record")
     mat = ins.data[0]
-    notify_material_uploaded(
+    background_tasks.add_task(
+        notify_material_uploaded,
         sb,
         module_id=module_id,
         course_id=course["id"],
