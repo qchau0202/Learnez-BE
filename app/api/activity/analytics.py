@@ -304,22 +304,64 @@ class StudentPathAlternative(BaseModel):
     course_id: int | None = None
     code: str
     name: str
-    credits: int = Field(ge=1, le=12)
     reason: str
 
 
+class StudentPathRecommendationCourse(BaseModel):
+    """Inline catalog suggestion attached to a remedial / accelerated nudge."""
+    course_id: int | None = None
+    code: str
+    name: str
+
+
+class StudentPathRecommendation(BaseModel):
+    """Performance-driven nudge attached to one path entry.
+
+    ``kind`` is the dynamic recommendation flavour:
+
+    * ``remedial`` — recent grade dipped; offer follow-up review courses.
+    * ``accelerated`` — strong performance; offer next-step / advanced.
+    * ``info`` — neutral coaching note (e.g., on track).
+    """
+
+    kind: str  # "remedial" | "accelerated" | "info"
+    message: str
+    suggestions: list[StudentPathRecommendationCourse] = Field(default_factory=list)
+
+
 class StudentPathCourse(BaseModel):
-    """One row in the personalised learning path."""
+    """One row in the personalised learning path.
+
+    ``status`` is one of:
+    * ``completed`` — graded and finished
+    * ``in_progress`` — currently running
+    * ``upcoming`` — enrolled but not started yet
+    """
+
     id: str
     course_id: int | None = None
     code: str
     name: str
-    credits: int = Field(ge=1, le=12)
-    status: str  # "completed" | "in_progress" | "pending_registration" | "registered_upcoming"
+    status: str
     semester: int | None = None
     academic_year: str | None = None
     alternatives: list[StudentPathAlternative]
-    credits_requirement: str
+    recommendation: StudentPathRecommendation | None = None
+
+
+class StudentPathNextStep(BaseModel):
+    """Catalog course recommended as a *future* step (not yet enrolled).
+
+    Surfaced in a dedicated "Recommended next" section instead of being
+    mixed into the personal path — the student decides whether to enroll.
+    """
+
+    course_id: int
+    code: str
+    name: str
+    semester: int | None = None
+    academic_year: str | None = None
+    reason: str
 
 
 class StudentPathHeader(BaseModel):
@@ -334,6 +376,7 @@ class StudentLearningPathResponse(BaseModel):
     student_id: str
     path: StudentPathHeader
     courses: list[StudentPathCourse]
+    next_steps: list[StudentPathNextStep] = Field(default_factory=list)
     enrolled_courses: list[StudentCourseSummary]
     generated_at_utc: datetime
     data_source: str
@@ -2583,28 +2626,9 @@ def _coerce_date(value: Any) -> date | None:
     return None
 
 
-def _estimate_course_credits(course: dict[str, Any]) -> int:
-    """Derive a credit count for a course row.
-
-    The ``courses`` table doesn't store credits directly, so we approximate
-    from ``course_session_duration`` (minutes per session) using the standard
-    "1 credit ≈ 50 minutes of contact / week" rule, then clamp to a sensible
-    band. Falls back to 3 credits when no session duration is set, which is
-    the typical undergraduate default in our catalog.
-    """
-    duration = course.get("course_session_duration")
-    try:
-        minutes = int(duration) if duration is not None else 0
-    except (TypeError, ValueError):
-        minutes = 0
-    if minutes <= 0:
-        return 3
-    credits = max(1, min(6, round(minutes / 50.0)))
-    return int(credits)
-
-
 def _path_course_status(course: dict[str, Any], *, today: date) -> str:
-    """Bucket an enrolled course into one of the four UI status colors."""
+    """Bucket an enrolled course into one of the three UI status colors:
+    ``completed`` / ``in_progress`` / ``upcoming``."""
     if course.get("is_complete") is True:
         return "completed"
     end = _coerce_date(course.get("course_end_date"))
@@ -2612,7 +2636,7 @@ def _path_course_status(course: dict[str, Any], *, today: date) -> str:
     if end is not None and end < today:
         return "completed"
     if start is not None and start > today:
-        return "registered_upcoming"
+        return "upcoming"
     if start is not None and start <= today and (end is None or end >= today):
         return "in_progress"
     # No dates — treat as in_progress so it still shows up on the path.
@@ -2627,16 +2651,22 @@ def _load_path_catalog(
 ) -> list[dict[str, Any]]:
     """Load catalog courses usable as suggestions or alternatives.
 
-    Strategy:
+    Returns the *global* catalog (capped) so the recommendation engine has
+    enough options to draw from even after the student is enrolled in
+    most of their department's courses. The scoring inside
+    ``_pick_path_alternatives`` / ``_pick_recommendation_suggestions``
+    already prefers same-prefix and same-department candidates, so a
+    wider pool only adds breadth (e.g., cross-major next-step ideas)
+    without polluting the swap suggestions.
 
-    1. Try same-department courses first (best fit).
-    2. If that bucket has nothing left after excluding enrolled courses,
-       widen to all courses whose department lives in the same faculty.
-    3. If still empty, fall back to the global catalog (capped).
+    ``department_id`` / ``faculty_id`` are kept in the signature for
+    forward-compat and may inform future filters (e.g., honoring an
+    explicit catalog table).
 
     ``exclude_ids`` is the set of currently enrolled course ids — those
     never appear in the catalog list.
     """
+    _ = (department_id, faculty_id)  # currently unused, see docstring
     sb = get_supabase(service_role=True)
     if not sb:
         return []
@@ -2645,78 +2675,22 @@ def _load_path_catalog(
         "from_department, course_session_duration, course_start_date, course_end_date"
     )
 
-    def _filter(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return [
-            r
-            for r in rows
-            if r.get("id") is not None and int(r["id"]) not in exclude_ids
-        ]
-
-    # 1. Same department.
-    if department_id is not None:
-        try:
-            rows = (
-                sb.table("courses")
-                .select(select_cols)
-                .eq("from_department", department_id)
-                .limit(80)
-                .execute()
-                .data
-                or []
-            )
-        except Exception:
-            rows = []
-        filtered = _filter(rows)
-        if filtered:
-            return filtered
-
-    # 2. Same faculty — resolve department ids that belong to it.
-    sibling_dept_ids: list[int] = []
-    if faculty_id is not None:
-        try:
-            dep_rows = (
-                sb.table("departments")
-                .select("id")
-                .eq("from_faculty", faculty_id)
-                .execute()
-                .data
-                or []
-            )
-            sibling_dept_ids = [
-                int(d["id"]) for d in dep_rows if d.get("id") is not None
-            ]
-        except Exception:
-            sibling_dept_ids = []
-    if sibling_dept_ids:
-        try:
-            rows = (
-                sb.table("courses")
-                .select(select_cols)
-                .in_("from_department", sibling_dept_ids)
-                .limit(80)
-                .execute()
-                .data
-                or []
-            )
-        except Exception:
-            rows = []
-        filtered = _filter(rows)
-        if filtered:
-            return filtered
-
-    # 3. Global catalog fallback.
     try:
         rows = (
             sb.table("courses")
             .select(select_cols)
-            .limit(80)
+            .limit(120)
             .execute()
             .data
             or []
         )
     except Exception:
         rows = []
-    return _filter(rows)
+    return [
+        r
+        for r in rows
+        if r.get("id") is not None and int(r["id"]) not in exclude_ids
+    ]
 
 
 def _pick_path_alternatives(
@@ -2789,7 +2763,6 @@ def _pick_path_alternatives(
                 course_id=cand_id,
                 code=cand_code,
                 name=title,
-                credits=_estimate_course_credits(cand),
                 reason=reason,
             )
         )
@@ -2799,64 +2772,144 @@ def _pick_path_alternatives(
     return out
 
 
-def _build_credits_requirement(
+# Grade thresholds (0-10 scale) used by the recommendation engine.
+_REMEDIAL_GRADE_MAX = 5.5
+_ACCELERATED_GRADE_MIN = 8.5
+
+
+def _pick_recommendation_suggestions(
+    course: dict[str, Any],
+    catalog: list[dict[str, Any]],
+    *,
+    used_ids: set[int],
+    limit: int = 2,
+    prefer_advanced: bool = False,
+) -> list[StudentPathRecommendationCourse]:
+    """Pick catalog rows that pair well with a given course's recommendation.
+
+    For ``remedial`` we want **same-prefix** courses (review / refresher
+    of the same subject family). For ``accelerated`` we lean on
+    ``prefer_advanced=True`` which prefers different-prefix-but-same-dept
+    candidates so the student gets a *next* topic instead of repeating.
+    """
+    if not catalog:
+        return []
+    code = str(course.get("course_code") or "")
+    code_prefix = "".join(ch for ch in code[:3] if ch.isalpha()).upper()
+    dept = course.get("from_department")
+
+    def _score(c: dict[str, Any]) -> tuple[int, int]:
+        cand_code = str(c.get("course_code") or "")
+        cand_prefix = "".join(ch for ch in cand_code[:3] if ch.isalpha()).upper()
+        same_prefix = bool(code_prefix and cand_prefix == code_prefix)
+        same_dept = bool(
+            dept is not None and c.get("from_department") == dept
+        )
+        # Lower scores sort first.
+        if prefer_advanced:
+            # Want same-dept-but-different-subject; penalise same prefix.
+            return (
+                0 if (same_dept and not same_prefix) else (1 if same_dept else 2),
+                int(c.get("id") or 0),
+            )
+        return (
+            0 if same_prefix else (1 if same_dept else 2),
+            int(c.get("id") or 0),
+        )
+
+    candidates = sorted(
+        [c for c in catalog if int(c.get("id") or 0) not in used_ids],
+        key=_score,
+    )
+    out: list[StudentPathRecommendationCourse] = []
+    for cand in candidates:
+        cid = int(cand.get("id") or 0)
+        cand_code = str(cand.get("course_code") or "").strip() or f"C{cid}"
+        cand_prefix = "".join(ch for ch in cand_code[:3] if ch.isalpha()).upper()
+        same_prefix = bool(code_prefix and cand_prefix == code_prefix)
+        same_dept = bool(
+            dept is not None and cand.get("from_department") == dept
+        )
+        if not (same_prefix or same_dept):
+            continue
+        if prefer_advanced and same_prefix:
+            # Skip same-subject suggestions for the accelerated track.
+            continue
+        out.append(
+            StudentPathRecommendationCourse(
+                course_id=cid,
+                code=cand_code,
+                name=str(cand.get("title") or "Untitled course"),
+            )
+        )
+        used_ids.add(cid)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _build_path_recommendation(
     *,
     course: dict[str, Any],
     status: str,
-    student_department_name: str | None,
-    course_department_name: str | None = None,
-    avg_grade_10: float | None = None,
-) -> str:
-    """One-line plan/credit note shown under each path card."""
-    end = _coerce_date(course.get("course_end_date"))
-    start = _coerce_date(course.get("course_start_date"))
-    sem = course.get("semester")
-    program = student_department_name or "your program"
+    avg_grade_10: float | None,
+    catalog: list[dict[str, Any]],
+    used_ids: set[int],
+) -> StudentPathRecommendation | None:
+    """Performance-driven nudge attached to one path entry.
 
-    if status == "completed":
-        if avg_grade_10 is not None and avg_grade_10 > 0:
-            grade_note = f" (avg grade {avg_grade_10:.1f}/10)"
-        else:
-            grade_note = ""
-        return f"Counted toward {program} core/elective credits{grade_note}."
+    Returns ``None`` when the course doesn't warrant a recommendation
+    (e.g., upcoming with no grades yet, or solid mid-band performance).
+    """
+    if status == "upcoming":
+        # Future course — no performance signal yet.
+        return None
+
+    if avg_grade_10 is None or avg_grade_10 <= 0:
+        # No grades on file: only nudge if the course is in progress.
+        if status == "in_progress":
+            return StudentPathRecommendation(
+                kind="info",
+                message="No graded work yet — submit early and stay on the weekly cadence to build a baseline.",
+                suggestions=[],
+            )
+        return None
+
+    if avg_grade_10 < _REMEDIAL_GRADE_MAX:
+        suggestions = _pick_recommendation_suggestions(
+            course, catalog, used_ids=used_ids, limit=2, prefer_advanced=False,
+        )
+        msg = (
+            f"Average grade is {avg_grade_10:.1f}/10 — consider reviewing the same subject "
+            "with the suggested follow-up courses below before moving on."
+        )
+        return StudentPathRecommendation(
+            kind="remedial", message=msg, suggestions=suggestions,
+        )
+
+    if avg_grade_10 >= _ACCELERATED_GRADE_MIN:
+        suggestions = _pick_recommendation_suggestions(
+            course, catalog, used_ids=used_ids, limit=2, prefer_advanced=True,
+        )
+        msg = (
+            f"Strong performance ({avg_grade_10:.1f}/10) — you can accelerate by exploring the "
+            "more advanced topics suggested below."
+        )
+        return StudentPathRecommendation(
+            kind="accelerated", message=msg, suggestions=suggestions,
+        )
 
     if status == "in_progress":
-        if end is not None:
-            return (
-                f"Currently in progress — keep weekly submissions on track until {end.isoformat()}."
-            )
-        return "Currently in progress — keep weekly submissions and attendance steady."
-
-    if status == "registered_upcoming":
-        if start is not None:
-            return f"Registered. Starts on {start.isoformat()}; review prerequisites beforehand."
-        return "Registered for an upcoming term — review prerequisites before it starts."
-
-    # pending_registration — name the course's actual department when known
-    # so we don't misattribute, e.g., a Business course to a CS student's
-    # program. Same-department courses still get the cleaner copy.
-    same_program = (
-        course_department_name is not None
-        and student_department_name is not None
-        and course_department_name == student_department_name
-    )
-    if same_program:
-        if sem is not None:
-            return (
-                f"Open in {program} (semester {sem}) — fits the next bucket of credits in your plan."
-            )
-        return f"Open elective in {program} — fits the next bucket of credits in your plan."
-    if course_department_name:
-        if sem is not None:
-            return (
-                f"Open elective from {course_department_name} (semester {sem}) — broaden beyond your major."
-            )
-        return f"Open elective from {course_department_name} — broaden beyond your major."
-    return "Open catalog elective — review prerequisites with your advisor."
+        return StudentPathRecommendation(
+            kind="info",
+            message=f"On track at {avg_grade_10:.1f}/10 — keep up your weekly cadence.",
+            suggestions=[],
+        )
+    return None
 
 
 def _path_progress_pct(courses: list[StudentPathCourse]) -> int:
-    """Completed + half-credit-for-in-progress over total path size."""
+    """Completed counts as 1, in_progress as 0.5, upcoming as 0.1."""
     if not courses:
         return 0
     weight = 0.0
@@ -2865,7 +2918,7 @@ def _path_progress_pct(courses: list[StudentPathCourse]) -> int:
             weight += 1.0
         elif c.status == "in_progress":
             weight += 0.5
-        elif c.status == "registered_upcoming":
+        elif c.status == "upcoming":
             weight += 0.1
     return int(round(weight / len(courses) * 100))
 
@@ -2873,13 +2926,13 @@ def _path_progress_pct(courses: list[StudentPathCourse]) -> int:
 def _path_header_description(
     *,
     courses: list[StudentPathCourse],
+    next_steps: list[StudentPathNextStep],
     progress_pct: int,
     major: str | None,
 ) -> str:
     completed = sum(1 for c in courses if c.status == "completed")
     in_progress = sum(1 for c in courses if c.status == "in_progress")
-    pending = sum(1 for c in courses if c.status == "pending_registration")
-    upcoming = sum(1 for c in courses if c.status == "registered_upcoming")
+    upcoming = sum(1 for c in courses if c.status == "upcoming")
     program = major or "your program"
     bits = []
     if completed:
@@ -2887,14 +2940,18 @@ def _path_header_description(
     if in_progress:
         bits.append(f"{in_progress} in progress")
     if upcoming:
-        bits.append(f"{upcoming} registered")
-    if pending:
-        bits.append(f"{pending} suggested")
+        bits.append(f"{upcoming} upcoming")
+    if next_steps:
+        bits.append(f"{len(next_steps)} recommended next")
     if not bits:
-        return f"Personalised study plan for {program} — start by enrolling in your first courses."
+        return (
+            f"Personalised recommendations for {program} — start by enrolling in your first "
+            "courses, then this view will adapt to your performance."
+        )
     summary = ", ".join(bits)
     return (
-        f"Personalised study plan for {program}: {summary}. {progress_pct}% of the plan is complete."
+        f"Personalised recommendations for {program}: {summary}. "
+        f"You're {progress_pct}% through your enrolled track."
     )
 
 
@@ -2950,15 +3007,17 @@ async def get_student_learning_path(
 ):
     """Real-data backing for the student "Analytics → Learning Path" tab.
 
-    Builds a personalised plan from the courses the student is enrolled in
-    plus department-scoped catalog suggestions for slots they haven't
-    registered for yet. Each card carries:
+    The path is purely a *recommendation* surface — the student decides
+    whether to act on it. It contains:
 
-    * ``status`` — ``completed`` / ``in_progress`` / ``registered_upcoming``
-      / ``pending_registration``
-    * ``credits`` — heuristic credit count derived from session duration
-    * ``alternatives`` — up to two swap candidates from the catalog
-    * ``credits_requirement`` — short, contextual planning note
+    * ``courses`` — every course the student is enrolled in, bucketed
+      into ``completed`` / ``in_progress`` / ``upcoming``. Each card
+      may carry a performance-driven ``recommendation`` (remedial /
+      accelerated / info) and a few catalog ``alternatives``.
+    * ``next_steps`` — catalog courses recommended as future picks.
+      Newly imported courses (via the bulk-import flow) flow into this
+      list automatically because the catalog is read live from
+      ``public.courses`` on every request.
     """
     user = getattr(request.state, "user", None)
     if not user:
@@ -3020,7 +3079,7 @@ async def get_student_learning_path(
     department_name = profile.get("department_name")
     major = profile.get("major") or department_name
 
-    # Pull avg grade per enrolled course (only for "completed" copy).
+    # Pull avg grade per enrolled course — drives the recommendation engine.
     enrolled_id_set = {int(r["id"]) for r in enrolled_rows if r.get("id") is not None}
     submission_rows, assignment_meta = _student_submission_meta(
         student_id, course_ids=enrolled_id_set,
@@ -3040,11 +3099,18 @@ async def get_student_learning_path(
         faculty_id=faculty_id,
         exclude_ids=enrolled_id_set,
     )
+    catalog_sorted = sorted(
+        catalog,
+        key=lambda r: (
+            str(r.get("academic_year") or ""),
+            int(r.get("semester") or 0),
+            str(r.get("course_code") or ""),
+        ),
+    )
 
-    # Resolve department names so each "pending_registration" card can
-    # honestly attribute the course to its real department.
+    # Resolve department names for the next-step "reason" copy.
     referenced_dept_ids = {
-        int(d) for r in catalog + enrolled_rows
+        int(d) for r in catalog_sorted + enrolled_rows
         if (d := r.get("from_department")) is not None
     }
     dept_name_by_id: dict[int, str] = {}
@@ -3066,24 +3132,52 @@ async def get_student_learning_path(
         except Exception:
             dept_name_by_id = {}
 
-    # Reserve part of the catalog as forward-looking ``pending_registration``
-    # suggestions before the rest gets consumed as swap alternatives — this
-    # way thriving students always see at least a couple of next-step courses.
-    catalog_sorted = sorted(
-        catalog,
-        key=lambda r: (
-            str(r.get("academic_year") or ""),
-            int(r.get("semester") or 0),
-            str(r.get("course_code") or ""),
-        ),
-    )
-    enrolled_count = len(enrolled_rows)
-    target_suggestions = 0
-    if catalog_sorted:
-        target_suggestions = min(4, max(2, len(catalog_sorted) // 3 if enrolled_count else 4))
-        target_suggestions = min(target_suggestions, len(catalog_sorted))
+    today = datetime.now(timezone.utc).date()
 
-    # Prefer same-department catalog rows for suggestions when available.
+    # ----------------------------- Build path entries --------------------- #
+    # We track two independent dedup sets — a catalog course can be both
+    # an alternative for course A and a recommendation suggestion for
+    # course B; they live in different UI sections so the duplication
+    # isn't confusing. ``alt_used_ids`` keeps swap suggestions distinct
+    # across path entries, ``rec_used_ids`` does the same for the
+    # remedial / accelerated suggestion lists.
+    alt_used_ids: set[int] = set()
+    rec_used_ids: set[int] = set()
+    path_courses: list[StudentPathCourse] = []
+
+    for row in enrolled_rows:
+        cid = int(row["id"])
+        status = _path_course_status(row, today=today)
+        avg_g = avg_grade_per_course.get(cid)
+        recommendation = _build_path_recommendation(
+            course=row,
+            status=status,
+            avg_grade_10=avg_g if avg_g and avg_g > 0 else None,
+            catalog=catalog_sorted,
+            used_ids=rec_used_ids,
+        )
+        path_courses.append(
+            StudentPathCourse(
+                id=f"enrolled-{cid}",
+                course_id=cid,
+                code=str(row.get("course_code") or f"C{cid}"),
+                name=str(row.get("title") or "Untitled course"),
+                status=status,
+                semester=row.get("semester"),
+                academic_year=row.get("academic_year"),
+                alternatives=_pick_path_alternatives(
+                    row, catalog_sorted, used_ids=alt_used_ids,
+                ),
+                recommendation=recommendation,
+            )
+        )
+
+    # ----------------------------- Next-step recommendations -------------- #
+    # Surface 2-4 catalog courses as forward-looking ideas. Same-department
+    # rows come first; cross-department picks are framed as "broaden
+    # beyond your major". We exclude both the alternatives and the
+    # recommendation suggestions to avoid showing the same course in two
+    # different sections.
     if department_id is not None:
         dept_first = sorted(
             catalog_sorted,
@@ -3091,74 +3185,43 @@ async def get_student_learning_path(
         )
     else:
         dept_first = catalog_sorted
-    suggestion_rows = dept_first[:target_suggestions]
-    suggestion_ids = {int(r["id"]) for r in suggestion_rows if r.get("id") is not None}
-    alt_pool = [r for r in catalog_sorted if int(r.get("id") or 0) not in suggestion_ids]
+    consumed = alt_used_ids | rec_used_ids
+    next_step_pool = [
+        c for c in dept_first if int(c.get("id") or 0) not in consumed
+    ]
+    target_next = 0
+    if next_step_pool:
+        target_next = min(4, max(2, len(next_step_pool) // 2))
+        target_next = min(target_next, len(next_step_pool))
 
-    today = datetime.now(timezone.utc).date()
-
-    # ----------------------------- Build path ----------------------------- #
-    used_alt_ids: set[int] = set()
-    path_courses: list[StudentPathCourse] = []
-
-    for row in enrolled_rows:
-        cid = int(row["id"])
-        status = _path_course_status(row, today=today)
-        avg_g = avg_grade_per_course.get(cid)
-        path_courses.append(
-            StudentPathCourse(
-                id=f"enrolled-{cid}",
-                course_id=cid,
-                code=str(row.get("course_code") or f"C{cid}"),
-                name=str(row.get("title") or "Untitled course"),
-                credits=_estimate_course_credits(row),
-                status=status,
-                semester=row.get("semester"),
-                academic_year=row.get("academic_year"),
-                alternatives=_pick_path_alternatives(
-                    row, alt_pool, used_ids=used_alt_ids,
-                ),
-                credits_requirement=_build_credits_requirement(
-                    course=row,
-                    status=status,
-                    student_department_name=department_name,
-                    course_department_name=(
-                        dept_name_by_id.get(int(row["from_department"]))
-                        if row.get("from_department") is not None
-                        else None
-                    ),
-                    avg_grade_10=avg_g,
-                ),
-            )
-        )
-
-    for cand in suggestion_rows:
+    next_steps: list[StudentPathNextStep] = []
+    for cand in next_step_pool[:target_next]:
         cid = int(cand["id"])
-        # Use the alt_pool for these so we don't accidentally suggest a
-        # ``pending_registration`` slot as its own swap alternative.
-        path_courses.append(
-            StudentPathCourse(
-                id=f"catalog-{cid}",
+        cand_dept_id = cand.get("from_department")
+        cand_dept_name = (
+            dept_name_by_id.get(int(cand_dept_id)) if cand_dept_id is not None else None
+        )
+        sem = cand.get("semester")
+        if cand_dept_name and department_name and cand_dept_name == department_name:
+            if sem is not None:
+                reason = f"Catalog course in {cand_dept_name} (semester {sem}) — fits your program."
+            else:
+                reason = f"Catalog course in {cand_dept_name} — fits your program."
+        elif cand_dept_name:
+            if sem is not None:
+                reason = f"Open elective from {cand_dept_name} (semester {sem}) — broaden beyond your major."
+            else:
+                reason = f"Open elective from {cand_dept_name} — broaden beyond your major."
+        else:
+            reason = "Open catalog course — review with your advisor."
+        next_steps.append(
+            StudentPathNextStep(
                 course_id=cid,
                 code=str(cand.get("course_code") or f"C{cid}"),
                 name=str(cand.get("title") or "Untitled course"),
-                credits=_estimate_course_credits(cand),
-                status="pending_registration",
-                semester=cand.get("semester"),
+                semester=sem,
                 academic_year=cand.get("academic_year"),
-                alternatives=_pick_path_alternatives(
-                    cand, alt_pool, used_ids=used_alt_ids,
-                ),
-                credits_requirement=_build_credits_requirement(
-                    course=cand,
-                    status="pending_registration",
-                    student_department_name=department_name,
-                    course_department_name=(
-                        dept_name_by_id.get(int(cand["from_department"]))
-                        if cand.get("from_department") is not None
-                        else None
-                    ),
-                ),
+                reason=reason,
             )
         )
 
@@ -3171,6 +3234,7 @@ async def get_student_learning_path(
         ),
         description=_path_header_description(
             courses=path_courses,
+            next_steps=next_steps,
             progress_pct=progress_pct,
             major=major,
         ),
@@ -3192,10 +3256,9 @@ async def get_student_learning_path(
     ]
 
     if path_courses:
-        if any(c.status != "pending_registration" for c in path_courses):
-            data_source = "real"
-        else:
-            data_source = "catalog_only"
+        data_source = "real"
+    elif next_steps:
+        data_source = "catalog_only"
     else:
         data_source = "empty"
 
@@ -3203,6 +3266,7 @@ async def get_student_learning_path(
         student_id=student_id,
         path=header,
         courses=path_courses,
+        next_steps=next_steps,
         enrolled_courses=enrolled_summary,
         generated_at_utc=datetime.now(timezone.utc),
         data_source=data_source,
