@@ -13,16 +13,22 @@ The system has three storage layers:
    plans). The model trains on this layer, never on raw events directly.
 
 ```
-Supabase (truth)        →  raw events (`elearning_raw`)
+Supabase (truth)        →  raw events (`elearning_raw`)        [production path]
                               ↓
                     weekly aggregator job
                               ↓
-            features (`learnez_ai.student_weekly_features`)
-                              ↓
-                       model + thresholds
+            features (`learnez_ai.student_weekly_features`)    ←──── demo seeders
+                              ↓                                       (write here directly,
+                       model + thresholds                              skipping raw events)
                               ↓
               risk scores (`learnez_ai.risk_scores`)  ──→  /api/analytics/*
 ```
+
+> **Demo mode.** In a clean development install the `elearning_raw`
+> collections are intentionally left empty — see §6 "Operational pipeline"
+> for the demo seeding shortcut. Production deployments still write to
+> `elearning_raw` from `POST /api/activity/log`; the aggregator path remains
+> the canonical one.
 
 ---
 
@@ -153,6 +159,8 @@ spend time pre-populating them.
 
 ## 6. Operational pipeline (how the numbers refresh)
 
+### 6a. Production path (real student activity)
+
 1. `python -m BE.ml.data.backfill_weekly_features --weeks 12`
    — replay `elearning_raw` into `student_weekly_features`.
 2. `python -m BE.ml.training.train_dropout_model --label-mode composite`
@@ -166,6 +174,48 @@ spend time pre-populating them.
 
 The Admin dashboard surfaces the data-source label so you can tell which
 path served the answer.
+
+### 6b. Demo / thesis-mode path (no raw events required)
+
+`elearning_raw` is intentionally not seeded for demo runs — generating
+millions of synthetic events just to re-aggregate them is wasteful when we
+can write the aggregate features directly. Use the cohort orchestrator
+instead:
+
+```bash
+cd BE
+python -m ml.data.seed_demo_cohort \
+  --weeks 16 --ignore-course-window \
+  --pin "student1@email.com:at_risk,student2@email.com:thriving" \
+  --train --score
+```
+
+What it touches:
+
+| Layer / collection                            | Written by                         | Purpose                                                        |
+|-----------------------------------------------|-------------------------------------|----------------------------------------------------------------|
+| `learnez_ai.student_weekly_features`          | `seed_demo_student.py`              | drives engagement charts, model training, ML risk inference    |
+| `public.course_attendance`                    | `seed_demo_attendance.py`           | populates lecturer attendance dashboards & student check-in log|
+| `public.assignment_submissions` / `_answers`  | `seed_demo_submissions.py`          | populates grade-distribution chart & lecturer "graded" tab     |
+| `learnez_ai.risk_scores`                      | `sample_dropout_predictions.py`     | cached predictions read by `/api/analytics/*`                  |
+
+Personas (`thriving` / `steady` / `at_risk`) are deterministically assigned
+from a hash of `user_id`, so the same student keeps the same fingerprint
+across re-runs. `--pin email:persona` overrides specific accounts so the
+demo always has a guaranteed at-risk learner to walk through.
+
+All three seeders are idempotent:
+
+* weekly features are upserted by `(user_id, course_id, week_start)`;
+* attendance only inserts new `(student_id, course_id, session_date)` triples;
+* submissions skip any `(student_id, assignment_id)` that already exists
+  (we never mutate or delete graded work).
+
+`elearning_raw.activity_events` & friends remain empty. That is fine — the
+model only reads `student_weekly_features`. If you ever want to validate
+the production aggregator against demo data, run
+`backfill_weekly_features` against a separate Mongo instance instead of
+mixing real and synthetic events.
 
 ---
 

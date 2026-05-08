@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, List
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
 
 from app.core.database import get_supabase
 from app.core.dependencies import ROLE_MAP, require_permissions, require_roles, user_has_permissions
@@ -170,6 +170,54 @@ def _question_ids_for_assignment(sb, assignment_id: int) -> set[int]:
     return {r["id"] for r in (q.data or [])}
 
 
+def _derive_assignment_mode(types: list[str | None]) -> str:
+    """Compute the assignment "mode" from the set of question types.
+
+    Mirrors the FE-side `inferAssignmentModeFromRow` so we can compute it
+    server-side once instead of forcing the client to re-fetch the detail
+    payload for every assignment in a course.
+    """
+    norm = {(t or "").strip().lower() for t in types if t}
+    if "essay" in norm:
+        return "essay"
+    if "mcq" in norm:
+        return "mcq"
+    return "manual"
+
+
+def _enrich_assignments_with_mode(sb, rows: list[dict]) -> list[dict]:
+    """Attach a `mode` field to each assignment row using one batched lookup.
+
+    Question rows can be many; if the lookup fails, we still return the
+    original rows so list endpoints never break on the auxiliary query.
+    """
+    if not rows:
+        return []
+    aids = [r["id"] for r in rows if r.get("id") is not None]
+    types_by_aid: dict[int, list[str | None]] = {}
+    if aids:
+        try:
+            qres = (
+                sb.table("assignment_questions")
+                .select("assignment_id,type")
+                .in_("assignment_id", aids)
+                .execute()
+            )
+            for q in qres.data or []:
+                aid = q.get("assignment_id")
+                if aid is None:
+                    continue
+                types_by_aid.setdefault(aid, []).append(q.get("type"))
+        except Exception:
+            return rows
+    out: list[dict] = []
+    for r in rows:
+        row = dict(r)
+        row["mode"] = _derive_assignment_mode(types_by_aid.get(r.get("id"), []))
+        out.append(row)
+    return out
+
+
 def _reset_submission_grading(sb, submission_id: int):
     sb.table("assignment_submission_answers").update(
         {
@@ -312,6 +360,7 @@ def _submission_timing_patch(assignment_row: dict, *, status: str, elapsed_time:
 
 
 def _after_submit_notifications(sb, assignment_row: dict, student_id: str, sub_row: dict) -> None:
+    """Synchronous fan-out (kept for parity / tests)."""
     sid = sub_row["id"]
     notify_submission_received(
         sb,
@@ -329,6 +378,41 @@ def _after_submit_notifications(sb, assignment_row: dict, student_id: str, sub_r
         )
     else:
         notify_partial_grading_pending(
+            sb,
+            student_id=student_id,
+            assignment_row=assignment_row,
+            submission_id=sid,
+        )
+
+
+def _schedule_after_submit_notifications(
+    background_tasks: BackgroundTasks,
+    sb,
+    assignment_row: dict,
+    student_id: str,
+    sub_row: dict,
+) -> None:
+    """Defer submission/grade notification inserts so the response returns immediately."""
+    sid = sub_row["id"]
+    background_tasks.add_task(
+        notify_submission_received,
+        sb,
+        student_id=student_id,
+        assignment_row=assignment_row,
+        submission_id=sid,
+    )
+    if sub_row.get("is_corrected"):
+        background_tasks.add_task(
+            notify_grades_released,
+            sb,
+            student_id=student_id,
+            assignment_row=assignment_row,
+            submission_id=sid,
+            final_score=sub_row.get("final_score"),
+        )
+    else:
+        background_tasks.add_task(
+            notify_partial_grading_pending,
             sb,
             student_id=student_id,
             assignment_row=assignment_row,
@@ -362,6 +446,7 @@ def _can_edit_submission(user: dict[str, Any], sub: dict) -> bool:
 @router.post("/", response_model=AssignmentOut, status_code=status.HTTP_201_CREATED)
 async def create_assignment(
     payload: AssignmentCreate,
+    background_tasks: BackgroundTasks,
     user: dict[str, Any] = Depends(require_permissions(["assignment-01"])),
 ):
     sb = _sb()
@@ -393,6 +478,7 @@ async def create_assignment(
         raise HTTPException(status_code=500, detail="Failed to create assignment")
     aid = created.data[0]["id"]
 
+    has_questions = bool(payload.questions)
     if payload.questions:
         for i, q in enumerate(payload.questions):
             qb = q.model_dump(exclude_unset=True)
@@ -401,8 +487,15 @@ async def create_assignment(
                 qb["order_index"] = i
             sb.table("assignment_questions").insert(qb).execute()
 
-    out = created.data[0]
-    notify_assignment_published(sb, out)
+    out = dict(created.data[0])
+    # Mode is cheap to derive locally from the just-inserted questions and
+    # avoids a follow-up Supabase round-trip.
+    out["mode"] = _derive_assignment_mode(
+        [q.type for q in (payload.questions or [])]
+    ) if has_questions else "manual"
+    # Fan-out to all enrolled students happens out of band so the lecturer
+    # does not wait on N inserts.
+    background_tasks.add_task(notify_assignment_published, sb, out)
     return out
 
 
@@ -414,18 +507,18 @@ async def list_assignments(
     role = ROLE_MAP.get(user["role_id"])
     if role == "Admin":
         res = sb.table("assignments").select("*").order("id", desc=True).execute()
-        return res.data or []
+        return _enrich_assignments_with_mode(sb, res.data or [])
     if role == "Lecturer":
         mids = _module_ids_for_lecturer(sb, user["user_id"])
         if not mids:
             return []
         res = sb.table("assignments").select("*").in_("module_id", mids).order("id", desc=True).execute()
-        return res.data or []
+        return _enrich_assignments_with_mode(sb, res.data or [])
     mids = _module_ids_for_student(sb, user["user_id"])
     if not mids:
         return []
     res = sb.table("assignments").select("*").in_("module_id", mids).order("id", desc=True).execute()
-    return res.data or []
+    return _enrich_assignments_with_mode(sb, res.data or [])
 
 
 @router.get("/{assignment_id}", response_model=AssignmentDetailOut)
@@ -446,13 +539,16 @@ async def get_assignment(
         .order("id")
         .execute()
     )
-    return {**row, "questions": qs.data or []}
+    questions = qs.data or []
+    mode = _derive_assignment_mode([q.get("type") for q in questions])
+    return {**row, "questions": questions, "mode": mode}
 
 
 @router.put("/{assignment_id}", response_model=AssignmentOut)
 async def update_assignment(
     assignment_id: int,
     payload: AssignmentUpdate,
+    background_tasks: BackgroundTasks,
     user: dict[str, Any] = Depends(require_permissions(["assignment-03"])),
 ):
     sb = _sb()
@@ -497,7 +593,8 @@ async def update_assignment(
     due_changed = "due_date" in data and str(old_due or "") != str(new_row.get("due_date") or "")
     hard_changed = "hard_due_date" in data and str(old_hard or "") != str(new_row.get("hard_due_date") or "")
     if due_changed or hard_changed:
-        notify_assignment_due_date_changed(
+        background_tasks.add_task(
+            notify_assignment_due_date_changed,
             sb,
             assignment_row=new_row,
             old_due=old_due,
@@ -612,6 +709,7 @@ async def delete_question(
 async def create_or_resubmit(
     assignment_id: int,
     payload: SubmissionCreate,
+    background_tasks: BackgroundTasks,
     user: dict[str, Any] = Depends(require_roles(["Student", "Admin"])),
 ):
     sb = _sb()
@@ -659,7 +757,7 @@ async def create_or_resubmit(
         _replace_submission_answers(sb, sub["id"], payload.answers, qids)
         _reset_submission_grading(sb, sub["id"])
         sub2 = auto_grade_submission(sb, arow, sub["id"])
-        _after_submit_notifications(sb, arow, student_id, sub2)
+        _schedule_after_submit_notifications(background_tasks, sb, arow, student_id, sub2)
         return _submission_to_out(sb, sub2, True)
 
     ins = (
@@ -692,7 +790,7 @@ async def create_or_resubmit(
         sb.table("assignment_submissions").delete().eq("id", sid).execute()
         raise
     sub3 = auto_grade_submission(sb, arow, sid)
-    _after_submit_notifications(sb, arow, student_id, sub3)
+    _schedule_after_submit_notifications(background_tasks, sb, arow, student_id, sub3)
     return _submission_to_out(sb, sub3, True)
 
 
@@ -763,6 +861,7 @@ async def update_submission(
     assignment_id: int,
     submission_id: int,
     payload: SubmissionUpdate,
+    background_tasks: BackgroundTasks,
     user: dict[str, Any] = Depends(require_roles(["Student", "Admin"])),
 ):
     sb = _sb()
@@ -809,7 +908,9 @@ async def update_submission(
         _reset_submission_grading(sb, submission_id)
     if answers is not None:
         s2 = auto_grade_submission(sb, arow, submission_id)
-        _after_submit_notifications(sb, arow, s2.get("student_id") or srow["student_id"], s2)
+        _schedule_after_submit_notifications(
+            background_tasks, sb, arow, s2.get("student_id") or srow["student_id"], s2
+        )
     else:
         s2 = sb.table("assignment_submissions").select("*").eq("id", submission_id).limit(1).execute().data[0]
     return _submission_to_out(sb, s2, True)

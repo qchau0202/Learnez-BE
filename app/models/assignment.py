@@ -112,6 +112,9 @@ class AssignmentOut(BaseModel):
     uploaded_by: Optional[str] = None
     duration_enabled: Optional[bool] = False
     duration: Optional[int] = None
+    # Computed server-side from question types so the client can render the
+    # correct UI (mcq / essay / manual) without a per-row detail fetch.
+    mode: Optional[str] = None
 
     class Config:
         from_attributes = True

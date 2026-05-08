@@ -424,7 +424,13 @@ class TrainingDatasetBuilder:
 
         personas: dict[str, str] = {}
         student_ids: set[str] | None = None
-        if label_mode != "proxy":
+        # Only the persona-driven label modes need a persona-membership filter.
+        # Composite mode derives the label from feature columns alone, so it
+        # must accept rows for *all* students (including real learners seeded by
+        # ``ml.data.seed_demo_cohort``, who are not present in
+        # ``elearning_raw.simulation_users``). Filtering here previously caused
+        # composite training to fail with "No training rows after filtering".
+        if label_mode in {"persona_multiclass", "persona_binary"}:
             personas = await self.load_student_personas()
             if personas:
                 student_ids = set(personas.keys())

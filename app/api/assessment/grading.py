@@ -1,6 +1,6 @@
 """Grading endpoints for lecturer/admin review."""
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
 from app.core.dependencies import require_roles
 from app.models.assignment import SubmissionFeedbackIn, SubmissionGradeIn, SubmissionOut
@@ -27,6 +27,7 @@ def _get_submission(sb, submission_id: int) -> dict:
 async def grade_submission(
     submission_id: int,
     payload: SubmissionGradeIn,
+    background_tasks: BackgroundTasks,
     user: dict = Depends(require_roles(["Admin", "Lecturer"])),
 ):
     """Lecturer/admin grades essay or mixed submissions."""
@@ -50,7 +51,8 @@ async def grade_submission(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if payload.finalize and updated.get("is_corrected"):
-        notify_grades_released(
+        background_tasks.add_task(
+            notify_grades_released,
             sb,
             student_id=submission["student_id"],
             assignment_row=assignment,
