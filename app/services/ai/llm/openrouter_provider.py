@@ -29,6 +29,7 @@ Configuration
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import httpx
 
@@ -86,6 +87,7 @@ class OpenRouterProvider(OpenAIProvider):
         messages: list[ChatMessage],
         system_prompt: str,
         tools: list[ToolDefinition],
+        extra_body: dict[str, Any] | None = None,
     ) -> ChatResponse:
         """Walk the model cascade until one returns a clean response.
 
@@ -93,6 +95,10 @@ class OpenRouterProvider(OpenAIProvider):
         rate-limited" signature on free models) and re-tries with the
         next entry. Anything else propagates so caller-level fallback
         (e.g. Gemini) can take over for genuine outages.
+
+        ``extra_body`` is forwarded to OpenRouter; we use it to pass
+        ``session_id`` so OpenRouter can group analytics by chat
+        session per their docs.
         """
         last_exc: Exception | None = None
         for idx, candidate in enumerate(self._cascade):
@@ -102,6 +108,7 @@ class OpenRouterProvider(OpenAIProvider):
                     messages=messages,
                     system_prompt=system_prompt,
                     tools=tools,
+                    extra_body=extra_body,
                 )
                 if idx > 0:
                     logger.info(

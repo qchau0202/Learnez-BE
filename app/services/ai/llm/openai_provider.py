@@ -50,6 +50,7 @@ class OpenAIProvider(ChatProvider):
         messages: list[ChatMessage],
         system_prompt: str,
         tools: list[ToolDefinition],
+        extra_body: dict[str, Any] | None = None,
     ) -> ChatResponse:
         wire_messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt}
@@ -106,6 +107,17 @@ class OpenAIProvider(ChatProvider):
                 for t in tools
             ]
             body["tool_choice"] = "auto"
+
+        # OpenRouter (and a few OpenAI-compatible vendors) accept extra
+        # top-level keys like ``session_id`` for upstream stateful
+        # tracking. We forward them verbatim — vendors that don't
+        # recognise the keys ignore them, so this is safe to pass even
+        # to vanilla OpenAI.
+        if extra_body:
+            for key, value in extra_body.items():
+                if value is None:
+                    continue
+                body.setdefault(key, value)
 
         headers = {
             "Authorization": f"Bearer {self._api_key}",

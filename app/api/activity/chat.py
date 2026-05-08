@@ -3,24 +3,34 @@
 This is the runtime that ties together:
 
 * The pluggable :mod:`app.services.ai.llm` provider (stub by default,
-  Gemini / OpenAI when an API key is wired up).
+  OpenRouter / Gemini / OpenAI when an API key is wired up).
 * The analytics-only tool registry in
   :mod:`app.services.ai.chat_tools` — the bot can reorder the path,
   swap alternatives, navigate analytics tabs, explain recommendations,
   and build a starter path for new students. It cannot touch course
   data.
+* Per-student chat **sessions** persisted to MongoDB
+  (:mod:`app.services.ai.chat_sessions`):
 
-Agentic loop
-------------
-1. Frontend posts the running conversation history.
+    - ``learnez_ai.agent_runs`` — session metadata.
+    - ``elearning_raw.chat_events`` — turn log (user + assistant turns).
+    - ``elearning_raw.ai_action_events`` — tool-call audit trail.
+
+The student-facing UI gives every user up to **five active sessions**.
+Beyond the cap they must delete one before starting a new conversation.
+The cap is enforced server-side in
+:func:`chat_sessions.enforce_session_cap`.
+
+Agent loop
+----------
+1. Frontend posts the running history *plus* a ``session_id``.
 2. We append a fresh system prompt that pins down scope.
-3. We call the LLM provider with the registered tools — exactly one
-   request per chat turn so we stay within free-tier RPM budgets.
-4. If the model returns ``tool_calls``, we execute them locally. The
-   reply text is taken from the model's prose; if it stayed silent,
-   we synthesise a reply from the tool's own ``message`` field.
-5. The final response is returned to the FE alongside any actions it
-   should perform on the client (navigation, reorder, swap, etc.).
+3. We run a bounded multi-turn loop: at most three LLM rounds + six
+   tool calls per user turn so a misbehaving model cannot run away.
+4. Every tool call is dispatched locally; we audit it in
+   ``ai_action_events``.
+5. The user message and the assistant turns are persisted to
+   ``chat_events`` so the FE can hydrate any session on demand.
 """
 
 from __future__ import annotations
@@ -34,6 +44,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.core.dependencies import ROLE_MAP
+from app.services.ai import chat_sessions
 from app.services.ai.chat_tools import (
     dispatch_tool,
     list_tool_definitions,
@@ -96,12 +107,18 @@ _SYSTEM_PROMPT = (
 )
 
 
+# --------------------------------------------------------------------------- #
+# Pydantic wire types
+# --------------------------------------------------------------------------- #
+
+
 class ChatRequestMessage(BaseModel):
     role: str = Field(pattern=r"^(user|assistant)$")
     content: str = Field(min_length=1, max_length=4000)
 
 
 class ChatRequestBody(BaseModel):
+    session_id: str = Field(min_length=8, max_length=64)
     messages: list[ChatRequestMessage] = Field(min_length=1, max_length=40)
 
 
@@ -114,12 +131,48 @@ class ChatToolCallResult(BaseModel):
 class ChatResponseBody(BaseModel):
     reply: str
     provider: str
+    session_id: str
     tool_results: list[ChatToolCallResult] = Field(default_factory=list)
 
 
-@router.post("/learning-path", response_model=ChatResponseBody)
-async def post_learning_path_chat(body: ChatRequestBody, request: Request):
-    """Run one agentic turn over the student's analytics chat."""
+class ChatSessionView(BaseModel):
+    session_id: str
+    title: str
+    status: str
+    message_count: int
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class ChatSessionList(BaseModel):
+    sessions: list[ChatSessionView]
+    max_sessions: int
+
+
+class CreateSessionBody(BaseModel):
+    title: str | None = Field(default=None, max_length=200)
+
+
+class ChatSessionMessage(BaseModel):
+    turn_id: str
+    role: str
+    content: str
+    tool_calls: list[dict[str, Any]] = Field(default_factory=list)
+    event_time: str | None = None
+    provider: str | None = None
+
+
+class ChatSessionMessageList(BaseModel):
+    session_id: str
+    messages: list[ChatSessionMessage]
+
+
+# --------------------------------------------------------------------------- #
+# Auth helper
+# --------------------------------------------------------------------------- #
+
+
+def _require_student(request: Request) -> str:
     user = getattr(request.state, "user", None)
     if not user:
         raise HTTPException(status_code=401, detail="Unauthenticated")
@@ -129,6 +182,91 @@ async def post_learning_path_chat(body: ChatRequestBody, request: Request):
     student_id = str(user.get("user_id") or "").strip()
     if not student_id:
         raise HTTPException(status_code=401, detail="Unauthenticated")
+    return student_id
+
+
+# --------------------------------------------------------------------------- #
+# Session CRUD endpoints
+# --------------------------------------------------------------------------- #
+
+
+@router.get("/sessions", response_model=ChatSessionList)
+async def list_chat_sessions(request: Request):
+    """List the student's active chat sessions, newest first."""
+    student_id = _require_student(request)
+    sessions = await chat_sessions.list_sessions(student_id)
+    return ChatSessionList(
+        sessions=[ChatSessionView(**s) for s in sessions],
+        max_sessions=chat_sessions.MAX_ACTIVE_SESSIONS_PER_USER,
+    )
+
+
+@router.post(
+    "/sessions",
+    response_model=ChatSessionView,
+    status_code=201,
+)
+async def create_chat_session(body: CreateSessionBody, request: Request):
+    """Open a new chat session — capped at five per student."""
+    student_id = _require_student(request)
+    try:
+        session = await chat_sessions.create_session(
+            user_id=student_id, title=body.title
+        )
+    except chat_sessions.SessionLimitExceeded as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return ChatSessionView(**session)
+
+
+@router.delete("/sessions/{session_id}", status_code=204)
+async def delete_chat_session(session_id: str, request: Request):
+    """Archive a session and purge its turns / tool audits."""
+    student_id = _require_student(request)
+    ok = await chat_sessions.delete_session(student_id, session_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return None
+
+
+@router.get(
+    "/sessions/{session_id}/messages",
+    response_model=ChatSessionMessageList,
+)
+async def get_chat_session_messages(session_id: str, request: Request):
+    """Replay every turn for a session in chronological order."""
+    student_id = _require_student(request)
+    session = await chat_sessions.get_session(student_id, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    rows = await chat_sessions.list_messages(student_id, session_id)
+    return ChatSessionMessageList(
+        session_id=session_id,
+        messages=[ChatSessionMessage(**r) for r in rows],
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Main chat endpoint
+# --------------------------------------------------------------------------- #
+
+
+@router.post("/learning-path", response_model=ChatResponseBody)
+async def post_learning_path_chat(body: ChatRequestBody, request: Request):
+    """Run one agentic turn over the student's analytics chat."""
+    student_id = _require_student(request)
+
+    # Resolve session — must exist and belong to this student. We allow
+    # the FE to call ``POST /sessions`` first; we don't auto-create on
+    # the chat endpoint, because that would silently bypass the cap.
+    session = await chat_sessions.get_session(student_id, body.session_id)
+    if not session:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Chat session not found. Open a new conversation from "
+                "the chat menu before sending a message."
+            ),
+        )
 
     primary = get_provider()
     fallback = get_fallback_provider()
@@ -138,18 +276,38 @@ async def post_learning_path_chat(body: ChatRequestBody, request: Request):
         ChatMessage(role=m.role, content=m.content) for m in body.messages  # type: ignore[arg-type]
     ]
 
+    # The latest user turn is at the end of the history. We persist it
+    # *before* the LLM runs so a crash mid-call doesn't lose user input.
+    latest_user_msg = next(
+        (m for m in reversed(body.messages) if m.role == "user"), None
+    )
+    if latest_user_msg is not None:
+        await chat_sessions.append_user_turn(
+            user_id=student_id,
+            session_id=body.session_id,
+            content=latest_user_msg.content,
+        )
+        # First user message in a session gets promoted into the title.
+        if int(session.get("message_count", 0)) == 0:
+            await chat_sessions.touch_session(
+                user_id=student_id,
+                session_id=body.session_id,
+                new_title=latest_user_msg.content,
+                increment_messages=1,
+            )
+        else:
+            await chat_sessions.touch_session(
+                user_id=student_id,
+                session_id=body.session_id,
+                increment_messages=1,
+            )
+
     tool_results: list[ChatToolCallResult] = []
     final_text: str = ""
     used_provider: ChatProvider = primary
+    last_assistant_turn_id: str | None = None
+    extra_body = {"session_id": body.session_id}
 
-    # Bounded multi-turn agent loop: each round is one LLM call followed
-    # by deterministic execution of any tools the model requested. We
-    # cap the loop at ``MAX_ROUNDS`` so a misbehaving model can't burn
-    # quota in a runaway. Two-round loops are common (discover via
-    # summarize_recent_grades → act with reorder_path / explain_*), so
-    # 3 rounds is enough headroom for tool chaining without exploding
-    # RPM. The OpenRouter cascade handles per-model 429s internally so
-    # this loop only sees clean responses or hard failures.
     MAX_ROUNDS = 3
     MAX_TOOL_CALLS = 6
     rounds = 0
@@ -160,12 +318,35 @@ async def post_learning_path_chat(body: ChatRequestBody, request: Request):
             fallback=fallback,
             messages=history,
             tools=tools,
+            extra_body=extra_body,
         )
 
         if resp.content:
             # Always carry the latest narration forward; subsequent
             # rounds may overwrite it with a follow-up summary.
             final_text = resp.content.strip()
+
+        # Persist the assistant turn now so audits in
+        # ``ai_action_events`` can reference its ``turn_id``.
+        last_assistant_turn_id = await chat_sessions.append_assistant_turn(
+            user_id=student_id,
+            session_id=body.session_id,
+            content=resp.content or "",
+            tool_calls=[
+                {
+                    "id": tc.id,
+                    "name": tc.name,
+                    "arguments": tc.arguments,
+                }
+                for tc in resp.tool_calls
+            ],
+            provider=used_provider.name,
+        )
+        await chat_sessions.touch_session(
+            user_id=student_id,
+            session_id=body.session_id,
+            increment_messages=1,
+        )
 
         if not resp.tool_calls:
             # Pure prose response — the model has nothing more to do.
@@ -180,7 +361,7 @@ async def post_learning_path_chat(body: ChatRequestBody, request: Request):
         )
         # Execute tools sequentially; parallel execution would race FE
         # state (e.g. two reorders on the same local path).
-        for call in resp.tool_calls:
+        for idx, call in enumerate(resp.tool_calls):
             if len(tool_results) >= MAX_TOOL_CALLS:
                 logger.warning(
                     "Tool budget exhausted (%d calls); ignoring extras.",
@@ -203,6 +384,16 @@ async def post_learning_path_chat(body: ChatRequestBody, request: Request):
                     content=json.dumps(result, default=str),
                 )
             )
+            if last_assistant_turn_id:
+                await chat_sessions.append_tool_audit(
+                    user_id=student_id,
+                    session_id=body.session_id,
+                    turn_id=last_assistant_turn_id,
+                    index=idx,
+                    tool_name=call.name,
+                    arguments=call.arguments,
+                    result=result,
+                )
         if len(tool_results) >= MAX_TOOL_CALLS:
             break
 
@@ -234,8 +425,14 @@ async def post_learning_path_chat(body: ChatRequestBody, request: Request):
     return ChatResponseBody(
         reply=final_text,
         provider=used_provider.name,
+        session_id=body.session_id,
         tool_results=tool_results,
     )
+
+
+# --------------------------------------------------------------------------- #
+# LLM provider helper (with fallback chain)
+# --------------------------------------------------------------------------- #
 
 
 async def _generate_with_fallback(
@@ -244,6 +441,7 @@ async def _generate_with_fallback(
     fallback: ChatProvider | None,
     messages: list[ChatMessage],
     tools: list[Any],
+    extra_body: dict[str, Any] | None = None,
 ) -> tuple[ChatResponse, ChatProvider]:
     """Run one LLM request with optional fallback on transient failure.
 
@@ -256,6 +454,7 @@ async def _generate_with_fallback(
             messages=messages,
             system_prompt=_SYSTEM_PROMPT,
             tools=tools,
+            extra_body=extra_body,
         )
 
     def _is_transient(exc: Exception) -> bool:

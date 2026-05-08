@@ -40,7 +40,11 @@ class StubProvider(ChatProvider):
         messages: list[ChatMessage],
         system_prompt: str,
         tools: list[ToolDefinition],
+        extra_body: dict[str, Any] | None = None,
     ) -> ChatResponse:
+        # The stub is offline, so any provider-specific body keys
+        # (e.g. OpenRouter's ``session_id``) are simply discarded.
+        del extra_body
         # If the last message is a tool result, we've already executed
         # the action — produce a short prose confirmation and stop the
         # agentic loop instead of re-parsing the user input and looping

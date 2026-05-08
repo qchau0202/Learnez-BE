@@ -1,3 +1,4 @@
+import logging
 import os
 from dotenv import load_dotenv
 load_dotenv()
@@ -6,6 +7,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.middlewares.middleware import AuthMiddleware
 from app.api.router import router
+from app.services.ai.chat_sessions import ensure_chat_indexes
+
+logger = logging.getLogger(__name__)
 
 tags_metadata = [
     {"name": "IAM - Authentication", "description": "Login and bootstrap endpoints."},
@@ -50,6 +54,22 @@ app.add_middleware(
 )
 
 app.include_router(router)
+
+
+@app.on_event("startup")
+async def _ensure_chat_indexes() -> None:
+    """Create chat-session indexes on every boot.
+
+    Idempotent — Mongo silently no-ops if the index already exists.
+    Keeping it here means a fresh deployment doesn't have to remember
+    to run ``ml/data/mongodb_bootstrap.py`` before the chatbot works.
+    """
+    try:
+        await ensure_chat_indexes()
+    except Exception as exc:
+        # Don't crash the API on a Mongo hiccup at boot — the chat
+        # endpoint will surface a real error if Mongo is genuinely down.
+        logger.warning("Failed to ensure chat indexes at startup: %s", exc)
 
 
 @app.get("/")

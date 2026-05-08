@@ -78,6 +78,13 @@ class ChatProvider(Protocol):
         messages: list[ChatMessage],
         system_prompt: str,
         tools: list[ToolDefinition],
+        extra_body: dict[str, Any] | None = None,
     ) -> ChatResponse:
-        """Run one inference round and return either content or tool calls."""
+        """Run one inference round and return either content or tool calls.
+
+        ``extra_body`` is forwarded verbatim into the provider's request
+        body when supported (currently the OpenAI-compatible providers
+        use it to pass OpenRouter's ``session_id`` for upstream session
+        continuity). Providers that don't recognise the keys ignore it.
+        """
         ...

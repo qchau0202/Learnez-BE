@@ -47,7 +47,11 @@ class GeminiProvider(ChatProvider):
         messages: list[ChatMessage],
         system_prompt: str,
         tools: list[ToolDefinition],
+        extra_body: dict[str, Any] | None = None,
     ) -> ChatResponse:
+        # ``extra_body`` is OpenAI-compatible vocabulary (session_id etc.);
+        # Gemini's API has no equivalent, so we accept and discard it.
+        del extra_body
         body: dict[str, Any] = {
             "contents": _to_gemini_contents(messages),
             "systemInstruction": {"parts": [{"text": system_prompt}]},
