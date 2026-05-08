@@ -2,10 +2,11 @@
 
 from fastapi import APIRouter
 
-from app.api.activity import activity, analytics, simulation
+from app.api.activity import activity, analytics, chat, simulation
 
 router = APIRouter(tags=["Activity & AI"])
 
 router.include_router(activity.router)
 router.include_router(analytics.router)
+router.include_router(chat.router)
 router.include_router(simulation.router)
