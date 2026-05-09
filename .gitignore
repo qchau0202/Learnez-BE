@@ -1,8 +1,13 @@
 __pycache__/
 .env
+.env.*
 .venv/
+venv/
 .DS_Store
 .idea/
 .pytest_cache/
 .ruff_cache/
 .vscode/
+
+# local terminal logs / temp scripts
+*.log
