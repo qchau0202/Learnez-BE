@@ -1,4 +1,7 @@
+import asyncio
+import logging
 import os
+
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -6,6 +9,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.middlewares.middleware import AuthMiddleware
 from app.api.router import router
+from app.core.database import get_mongo_ai_db, get_mongo_raw_db
+
+logger = logging.getLogger(__name__)
 
 tags_metadata = [
     {"name": "IAM - Authentication", "description": "Login and bootstrap endpoints."},
@@ -50,6 +56,37 @@ app.add_middleware(
 )
 
 app.include_router(router)
+
+
+@app.on_event("startup")
+async def _prewarm_mongo() -> None:
+    """Open the Mongo Atlas connection pool *before* the first user
+    request lands.
+
+    Without this the very first request after boot pays the full TLS
+    + cluster discovery handshake (~10–15 s on free Atlas tiers),
+    which makes the app feel broken on a cold start. We fire a cheap
+    ``ping`` against both DBs in the background so the connection
+    pool is hot when the FE starts polling.
+
+    Failures are logged, not raised — Mongo can recover later and we
+    don't want a transient cloud hiccup at boot to take the whole API
+    down.
+    """
+
+    async def _ping() -> None:
+        try:
+            await asyncio.gather(
+                get_mongo_ai_db().command("ping"),
+                get_mongo_raw_db().command("ping"),
+            )
+            logger.info("Mongo connection pool prewarmed.")
+        except Exception as exc:
+            logger.warning("Mongo prewarm failed (will retry on demand): %s", exc)
+
+    # Run as a background task so startup completes immediately and the
+    # health check passes even while the prewarm is still in flight.
+    asyncio.create_task(_ping())
 
 
 @app.get("/")
