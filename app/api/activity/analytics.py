@@ -6,6 +6,7 @@ why a student got a given recommendation or risk level.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -19,6 +20,7 @@ from pydantic import BaseModel, Field
 from app.api.deps import AiDbDep
 from app.core.database import get_supabase
 from app.core.dependencies import ROLE_MAP
+from app.core.supabase_cache import DYNAMIC_CACHE, STATIC_CACHE, is_miss
 from app.services.notifications.scenario_notifications import parse_iso_datetime
 from ml.training.dataset_builder import FEATURE_COLUMNS
 from ml.training.risk_bands import load_thresholds, risk_level_from_score, score_from_probabilities
@@ -558,8 +560,10 @@ async def _load_risk_cards_from_risk_scores(
     return list(latest_by_user_course.values())
 
 
-def _load_enrollment_pairs(allowed_course_ids: set[int] | None) -> set[tuple[str, int]] | None:
-    """Return the authoritative ``(student_id, course_id)`` enrollment set.
+def _load_enrollment_pairs_sync(allowed_course_ids: set[int] | None) -> set[tuple[str, int]] | None:
+    """Sync core for :func:`_load_enrollment_pairs` — runs in a worker
+    thread so the asyncio event loop isn't blocked while Supabase
+    answers (which can take 100–500 ms per round-trip).
 
     Returns ``None`` when Supabase is unreachable so callers can fall back to
     not filtering rather than silently returning empty.
@@ -597,8 +601,32 @@ def _load_enrollment_pairs(allowed_course_ids: set[int] | None) -> set[tuple[str
     return out
 
 
-def _load_course_meta(course_ids: list[int]) -> dict[int, dict[str, Any]]:
-    """Pull ``course_code``, ``title``, ``class_room`` for the given course ids."""
+async def _load_enrollment_pairs(
+    allowed_course_ids: set[int] | None,
+) -> set[tuple[str, int]] | None:
+    """Async + 60s-TTL-cached variant of :func:`_load_enrollment_pairs_sync`.
+
+    Cache key includes the course-id scope so an admin (no scope) and a
+    lecturer (course-restricted) don't share buckets.
+    """
+    if allowed_course_ids is None:
+        cache_key = "enrollment_pairs:all"
+    else:
+        # Sort so the same scope produces the same key regardless of
+        # caller iteration order.
+        cache_key = "enrollment_pairs:" + ",".join(
+            str(c) for c in sorted(int(x) for x in allowed_course_ids)
+        )
+    cached = DYNAMIC_CACHE.get(cache_key)
+    if not is_miss(cached):
+        return cached
+    result = await asyncio.to_thread(_load_enrollment_pairs_sync, allowed_course_ids)
+    DYNAMIC_CACHE.set(cache_key, result)
+    return result
+
+
+def _load_course_meta_sync(course_ids: list[int]) -> dict[int, dict[str, Any]]:
+    """Sync core for :func:`_load_course_meta`. Runs in a worker thread."""
     if not course_ids:
         return {}
     sb = get_supabase(service_role=True)
@@ -623,7 +651,86 @@ def _load_course_meta(course_ids: list[int]) -> dict[int, dict[str, Any]]:
     return out
 
 
-def _resolve_student_org_map(user_ids: list[str]) -> dict[str, dict[str, Any]]:
+async def _load_course_meta(course_ids: list[int]) -> dict[int, dict[str, Any]]:
+    """5-min-cached, off-thread course metadata lookup.
+
+    Course rows rarely change at runtime so the cache TTL is generous.
+    Cache key is the canonical sorted id list so two callers asking for
+    the same set hit the same bucket.
+    """
+    if not course_ids:
+        return {}
+    ids = sorted({int(c) for c in course_ids})
+    cache_key = "course_meta:" + ",".join(str(c) for c in ids)
+    cached = STATIC_CACHE.get(cache_key)
+    if not is_miss(cached):
+        return cached
+    result = await asyncio.to_thread(_load_course_meta_sync, ids)
+    STATIC_CACHE.set(cache_key, result)
+    return result
+
+
+def _load_faculties_sync() -> dict[int, str]:
+    """``id -> name`` for all faculties. Sync core, runs in a worker thread."""
+    sb = get_supabase(service_role=True)
+    if not sb:
+        return {}
+    fac_rows = sb.table("faculties").select("id, name").execute().data or []
+    return {
+        int(r["id"]): str(r.get("name") or "")
+        for r in fac_rows
+        if r.get("id") is not None
+    }
+
+
+def _load_departments_sync() -> dict[int, dict[str, Any]]:
+    """``id -> {id, name, from_faculty}`` for all departments. Sync core."""
+    sb = get_supabase(service_role=True)
+    if not sb:
+        return {}
+    dep_rows = sb.table("departments").select("id, name, from_faculty").execute().data or []
+    return {int(r["id"]): r for r in dep_rows if r.get("id") is not None}
+
+
+async def _load_faculties_cached() -> dict[int, str]:
+    cached = STATIC_CACHE.get("faculties")
+    if not is_miss(cached):
+        return cached
+    result = await asyncio.to_thread(_load_faculties_sync)
+    STATIC_CACHE.set("faculties", result)
+    return result
+
+
+async def _load_departments_cached() -> dict[int, dict[str, Any]]:
+    cached = STATIC_CACHE.get("departments")
+    if not is_miss(cached):
+        return cached
+    result = await asyncio.to_thread(_load_departments_sync)
+    STATIC_CACHE.set("departments", result)
+    return result
+
+
+def _fetch_user_chunks_sync(
+    table: str, columns: str, uids: list[str], chunk_size: int = 100
+) -> list[dict[str, Any]]:
+    """Chunked ``in.(...)`` fetch on a user-keyed table. Sync core.
+
+    PostgREST encodes ``in.()`` filters in the URL; with several hundred
+    UUIDs the URL exceeds the gateway limit and Supabase returns a plain
+    ``Bad Request``. Chunk the lookups so each request stays small.
+    """
+    sb = get_supabase(service_role=True)
+    if not sb:
+        return []
+    out_rows: list[dict[str, Any]] = []
+    for i in range(0, len(uids), chunk_size):
+        batch = uids[i : i + chunk_size]
+        res = sb.table(table).select(columns).in_("user_id", batch).execute()
+        out_rows.extend(res.data or [])
+    return out_rows
+
+
+async def _resolve_student_org_map(user_ids: list[str]) -> dict[str, dict[str, Any]]:
     """Look up faculty/department/identity for a batch of student user_ids.
 
     Resolution rules:
@@ -631,46 +738,53 @@ def _resolve_student_org_map(user_ids: list[str]) -> dict[str, dict[str, Any]]:
       - Faculty is resolved via ``departments.from_faculty`` when the profile's
         ``faculty_id`` is null but a department is set.
       - Falls back to ``users`` for full_name/email so admins can see real names.
+
+    Optimisations layered on top of the original sync version:
+      * Faculties + departments come from a 5-min static cache (one
+        Supabase call per 5 min instead of every request).
+      * The two chunked ``in.()`` lookups now run **concurrently** off
+        the event loop — overlapping their network latency cuts the
+        per-request cost roughly in half.
+      * The whole resolved map is itself cached for 60 s keyed on the
+        sorted user-id list.
+
     Returns a dict keyed by user_id.
     """
     if not user_ids:
         return {}
-    sb = get_supabase(service_role=True)
-    if not sb:
-        return {}
     uids = sorted({str(u).strip() for u in user_ids if str(u or "").strip()})
     if not uids:
         return {}
-    fac_rows = sb.table("faculties").select("id, name").execute().data or []
-    faculty_name_by_id: dict[int, str] = {
-        int(r["id"]): str(r.get("name") or "") for r in fac_rows if r.get("id") is not None
-    }
-    dep_rows = sb.table("departments").select("id, name, from_faculty").execute().data or []
-    dep_by_id: dict[int, dict[str, Any]] = {
-        int(r["id"]): r for r in dep_rows if r.get("id") is not None
-    }
 
-    # PostgREST encodes ``in.()`` filters in the URL; with several hundred
-    # UUIDs the URL exceeds the gateway limit and Supabase returns a plain
-    # ``Bad Request``. Chunk the lookups so each request stays small.
-    def _chunked_in(table: str, columns: str, ids: list[str], chunk_size: int = 100) -> list[dict[str, Any]]:
-        out_rows: list[dict[str, Any]] = []
-        for i in range(0, len(ids), chunk_size):
-            batch = ids[i : i + chunk_size]
-            res = sb.table(table).select(columns).in_("user_id", batch).execute()
-            out_rows.extend(res.data or [])
-        return out_rows
+    # Cache by the cohort fingerprint. 60 s is short enough that admin
+    # edits to a user profile show up quickly, long enough that the
+    # dashboard's repeated polls hit the cache instead of Supabase.
+    cache_key = "org_map:" + ",".join(uids)
+    cached = DYNAMIC_CACHE.get(cache_key)
+    if not is_miss(cached):
+        return cached
 
-    sp_rows = _chunked_in(
-        "student_profiles",
-        "user_id, student_id, class, faculty_id, department_id",
-        uids,
+    # Run the four independent lookups concurrently. ``faculties`` and
+    # ``departments`` are usually warm-cached so they return instantly;
+    # the chunked ``student_profiles`` and ``users`` queries dominate
+    # and now overlap each other.
+    faculty_name_by_id, dep_by_id, sp_rows, user_rows = await asyncio.gather(
+        _load_faculties_cached(),
+        _load_departments_cached(),
+        asyncio.to_thread(
+            _fetch_user_chunks_sync,
+            "student_profiles",
+            "user_id, student_id, class, faculty_id, department_id",
+            uids,
+        ),
+        asyncio.to_thread(
+            _fetch_user_chunks_sync,
+            "users",
+            "user_id, full_name, email",
+            uids,
+        ),
     )
-    user_rows = _chunked_in(
-        "users",
-        "user_id, full_name, email",
-        uids,
-    )
+
     user_by_id = {str(r.get("user_id")): r for r in user_rows}
     out: dict[str, dict[str, Any]] = {}
     for sp in sp_rows:
@@ -712,15 +826,25 @@ def _resolve_student_org_map(user_ids: list[str]) -> dict[str, dict[str, Any]]:
             "department_id": None,
             "department_name": None,
         }
+    DYNAMIC_CACHE.set(cache_key, out)
     return out
 
 
-def _annotate_cards_with_org(cards: list[StudentRiskCard]) -> list[StudentRiskCard]:
+async def _annotate_cards_with_org(cards: list[StudentRiskCard]) -> list[StudentRiskCard]:
+    """Hydrate each risk card with org / course metadata.
+
+    Runs the org-map lookup and the course-meta lookup **concurrently**
+    via :func:`asyncio.gather` — they hit different Supabase tables and
+    have no inter-dependency, so overlapping their network round-trips
+    cuts annotation latency roughly in half.
+    """
     if not cards:
         return cards
-    org = _resolve_student_org_map([c.student_id for c in cards])
     course_ids = sorted({int(c.course_id) for c in cards if isinstance(c.course_id, int)})
-    course_meta = _load_course_meta(course_ids)
+    org, course_meta = await asyncio.gather(
+        _resolve_student_org_map([c.student_id for c in cards]),
+        _load_course_meta(course_ids),
+    )
     for c in cards:
         meta = org.get(c.student_id) or {}
         c.student_code = meta.get("student_code")
@@ -1337,11 +1461,17 @@ async def _load_all_risk_cards(
             )
         source = "weekly_features_fallback"
 
-    cards = _annotate_cards_with_org(cards)
-
+    # Annotation and the enrollment-pair lookup are independent — fire
+    # them in parallel so the slower of the two becomes the floor
+    # instead of their sum.
     if only_real_enrollments:
-        enrollment_pairs = _load_enrollment_pairs(allowed_course_ids)
+        cards, enrollment_pairs = await asyncio.gather(
+            _annotate_cards_with_org(cards),
+            _load_enrollment_pairs(allowed_course_ids),
+        )
         cards = _filter_cards_to_real_students(cards, enrollment_pairs=enrollment_pairs)
+    else:
+        cards = await _annotate_cards_with_org(cards)
 
     if student_self_id:
         cards = [c for c in cards if c.student_id == student_self_id]

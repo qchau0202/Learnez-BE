@@ -1,0 +1,86 @@
+# Render infrastructure-as-code for the Learnez backend.
+#
+# Render auto-detects this file when it sits at the repo root that the
+# Web Service points at. To use it:
+#
+# 1. In the Render dashboard: New + → "Blueprint" → connect this repo.
+# 2. Render reads `render.yaml`, asks you to confirm, and creates the
+#    web service with the build / start commands and runtime below.
+# 3. Add the secret env vars (Mongo URI, Supabase keys, etc.) under
+#    `Environment` once the service is created — they are listed with
+#    `sync: false` so Render prompts you instead of inheriting them.
+#
+# Free tier caveats (worth knowing for the report):
+# * The instance sleeps after ~15 min of inactivity; the first request
+#   after sleep takes ~30–60 s to wake.
+# * 750 free instance hours / month, plenty for one always-on demo.
+# * 512 MB RAM — fine for FastAPI + the cached classifier; if memory
+#   tightens, drop to a slimmer model artifact.
+
+services:
+  - type: web
+    name: learnez-api
+    runtime: python
+    plan: free
+    region: singapore
+    rootDir: .
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.13.7"
+      # CORS: must include the Vercel-served frontend domain. Comma-
+      # separated. Add staging URLs here too if you need them.
+      - key: CORS_ORIGINS
+        value: "https://learnez.online,https://www.learnez.online"
+      # OpenRouter attribution is shown on their dashboard so flip it
+      # from localhost once production lands.
+      - key: OPENROUTER_SITE_URL
+        value: "https://learnez.online"
+      - key: OPENROUTER_SITE_TITLE
+        value: "Learnez"
+      # Sensitive values — Render prompts for them in the dashboard.
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DB
+        sync: false
+      - key: MONGODB_RAW_DB
+        sync: false
+      - key: MONGODB_AI_DB
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_MATERIALS_BUCKET
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: CLOUDINARY_URL
+        sync: false
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+      - key: STUDENT_FILE_MAX_MB
+        sync: false
+      - key: STUDENT_STORAGE_QUOTA_MB
+        sync: false
+      - key: LLM_PROVIDER
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_MODELS
+        sync: false
+      - key: LLM_FALLBACK_PROVIDER
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: LLM_FALLBACK_MODEL
+        sync: false
