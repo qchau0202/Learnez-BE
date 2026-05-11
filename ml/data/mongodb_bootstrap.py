@@ -43,6 +43,7 @@ DECISION_COLLECTIONS = (
     "learning_paths",
     "recommendation_explanations",
     "agent_runs",
+    "syllabi",
 )
 
 
@@ -125,6 +126,11 @@ async def bootstrap_competency_profiles(db) -> None:
     await collection.create_index([("updated_at", -1)])
 
 
+async def bootstrap_syllabi(db) -> None:
+    collection = db["syllabi"]
+    await collection.create_index([("course_code", 1)], unique=True)
+
+
 async def bootstrap_risk_scores(db) -> None:
     collection = db["risk_scores"]
     await collection.create_index([("user_id", 1), ("course_id", 1), ("computed_at", -1)])
@@ -169,6 +175,7 @@ async def main() -> int:
     await bootstrap_student_weekly_features(ai_db)
     await bootstrap_course_engagement_features(ai_db)
     await bootstrap_competency_profiles(ai_db)
+    await bootstrap_syllabi(ai_db)
     await bootstrap_risk_scores(ai_db)
     await bootstrap_learning_paths(ai_db)
     await bootstrap_recommendation_explanations(ai_db)

@@ -90,19 +90,22 @@ def _create_student_account(
             "is_active": True,
         }
     ).execute()
-    svc.table("student_profiles").upsert(
-        {
-            "user_id": uid,
-            "student_id": f"S{stamp[-6:]}{idx:02d}",
-            "major": "Computer Science",
-            "enrolled_year": now.year - 1,
-            "current_gpa": round(5.5 + (idx % 10) * 0.35, 2),
-            "cumulative_gpa": round(5.7 + (idx % 10) * 0.33, 2),
-            "faculty_id": faculty_id,
-            "department_id": department_id,
-            "class": f"K{(idx % 3) + 1}",
-        }
-    ).execute()
+
+    profile_payload = {
+        "user_id": uid,
+        "student_id": f"S{stamp[-6:]}{idx:02d}",
+        "major": "Computer Science",
+        "enrolled_year": now.year - 1,
+        "current_gpa": round(5.5 + (idx % 10) * 0.35, 2),
+        "cumulative_gpa": round(5.7 + (idx % 10) * 0.33, 2),
+        "class": f"K{(idx % 3) + 1}",
+    }
+    # Only add these if they were successfully resolved from the database
+    if faculty_id: profile_payload["faculty_id"] = faculty_id
+    if department_id: profile_payload["department_id"] = department_id
+
+    svc.table("student_profiles").upsert(profile_payload).execute()
+
     return {"user_id": uid, "email": email, "full_name": full_name}
 
 
@@ -185,7 +188,7 @@ async def main_async() -> int:
     created_ids: list[str] = []
     student_course_pairs: list[tuple[str, int]] = []
     for i in range(count):
-        print(f"creating_student: {i + 1}/{count}", flush=True)
+        print(f"[{i + 1}/{count}] provisioning student account...", flush=True)
         created = _create_student_account(
             svc,
             idx=i + 1,
@@ -196,6 +199,7 @@ async def main_async() -> int:
         )
         chosen_course = courses[i % len(courses)]
         chosen_course_id = int(chosen_course["id"])
+        print(f"    enrolling in: {chosen_course['title']} (ID: {chosen_course_id})")
         _seed_student_learning_data(svc, student_id=created["user_id"], course_id=chosen_course_id, rng=rng)
         created_ids.append(created["user_id"])
         student_course_pairs.append((created["user_id"], chosen_course_id))

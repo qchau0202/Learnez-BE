@@ -9,7 +9,7 @@ future ingestion jobs, validators, and tests.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -19,7 +19,7 @@ class MongoBaseDocument(BaseModel):
     event_time: datetime
     source: Literal["web", "api", "job", "agent"]
     schema_version: int = 1
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class ActivityEvent(MongoBaseDocument):
@@ -85,7 +85,7 @@ class StudentWeeklyFeatureSnapshot(BaseModel):
     week_end: datetime
     source_event_max_time: datetime | None = None
     schema_version: int = 1
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     features: dict[str, float | int | bool | None] = Field(default_factory=dict)
 
 
@@ -119,6 +119,36 @@ class RiskScoreDocument(BaseModel):
     top_factors: list[dict[str, Any]] = Field(default_factory=list)
     feature_ref: dict[str, Any] = Field(default_factory=dict)
     schema_version: int = 1
+
+
+class RecommendationDocument(BaseModel):
+    user_id: str
+    course_id: int | None = None
+    risk_score_id: str | None = None  # Link tới bản ghi trong risk_scores
+    risk_level: str
+    risk_score: float
+    prompt_used: str
+    recommendation_text: str
+    model_name: str
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    schema_version: int = 1
+
+
+class SyllabusDocument(BaseModel):
+    course_code: str
+    title: str
+    description: str | None = None
+    credits: int | None = None
+    prerequisites: list[str] = Field(default_factory=list)
+    clos: list[dict[str, Any]] = Field(default_factory=list)  # Course Learning Outcomes
+    topics: list[dict[str, Any]] = Field(default_factory=list) # Detailed weekly topics/modules
+    assessment_methods: list[dict[str, Any]] = Field(default_factory=list)
+    source_url: str | None = None
+    crawled_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    schema_version: int = 1
+
+    class Config:
+        extra = "allow"
 
 
 class SupabaseSourceSpec(BaseModel):

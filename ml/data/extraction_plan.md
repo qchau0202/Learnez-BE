@@ -38,6 +38,7 @@ Use for identity resolution.
 
 - feed `user_id`, role, and account state into all downstream docs
 - use `role_id` / role name to scope student, lecturer, and admin behavior
+- **AI Note**: Crucial for student profile identity resolution in risk models.
 
 ### `courses`
 
@@ -45,6 +46,7 @@ Use for course context.
 
 - attach `course_id` and lecturer ownership to events
 - group behavior by subject, semester, academic year, and department
+- **AI Note**: Course descriptions are used as prompt context for LLM recommendations.
 
 ### `modules`
 
@@ -52,6 +54,7 @@ Use for finer-grained learning context.
 
 - connect material views and assignment behavior to a specific module
 - support course progression and engagement analysis
+- **AI Note**: Module descriptions help the AI identify specific competency gaps.
 
 ### `module_materials`
 
