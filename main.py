@@ -69,20 +69,6 @@ app.include_router(router)
 
 @app.on_event("startup")
 async def _prewarm_mongo() -> None:
-    """Open the Mongo Atlas connection pool *before* the first user
-    request lands.
-
-    Without this the very first request after boot pays the full TLS
-    + cluster discovery handshake (~10–15 s on free Atlas tiers),
-    which makes the app feel broken on a cold start. We fire a cheap
-    ``ping`` against both DBs in the background so the connection
-    pool is hot when the FE starts polling.
-
-    Failures are logged, not raised — Mongo can recover later and we
-    don't want a transient cloud hiccup at boot to take the whole API
-    down.
-    """
-
     async def _ping() -> None:
         try:
             await asyncio.gather(
