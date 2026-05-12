@@ -245,11 +245,16 @@ class TrainingDatasetBuilder:
 
     @staticmethod
     def _academic_strength(row: dict[str, Any]) -> float:
-        """0..1 from scores (0–100 scale) and on-time submission mix."""
+        """0..1 from scores (TDTU 0–10) + on-time submission mix.
+
+        Handles legacy 0–100 rows: divisor = 100 when value > 10.5, else 10.
+        """
         raw = row.get("avg_score_30d")
         score_comp = 0.5
         if raw is not None:
-            score_comp = max(0.0, min(1.0, float(raw) / 100.0))
+            value = float(raw)
+            divisor = 100.0 if value > 10.5 else 10.0
+            score_comp = max(0.0, min(1.0, value / divisor))
         subs = int(row.get("submissions_total") or 0)
         late = int(row.get("submissions_late") or 0)
         if subs <= 0:
@@ -275,13 +280,11 @@ class TrainingDatasetBuilder:
 
     @staticmethod
     def _composite_risk_tier(row: dict[str, Any]) -> int:
-        """Ternary dropout-risk tier using multiple dimensions (0=low, 1=medium, 2=high).
+        """Ternary dropout-risk tier (0=low, 1=medium, 2=high) from academic + engagement + attendance.
 
-        Combines academic, engagement, and attendance. **Strong academics reduce risk** even when
-        engagement is low (e.g. good assignment performance with modest app usage → lower tier).
-
-        Note: This is still a function of weekly features — expect strong but not perfect fit under
-        time split. For leakage-light archetype learning use ``persona_multiclass``.
+        Strong academics reduce risk even when engagement is low. Still a
+        function of weekly features — for leakage-light archetype learning
+        use ``persona_multiclass``.
         """
         a = TrainingDatasetBuilder._academic_strength(row)
         e = TrainingDatasetBuilder._engagement_strength(row)
@@ -375,11 +378,11 @@ class TrainingDatasetBuilder:
 
     @staticmethod
     def _proxy_dropout_label(row: dict[str, Any]) -> int:
-        """Heuristic label from the same engineered features.
+        """Heuristic label from engineered features.
 
-        **Leakage warning:** These rules use `FEATURE_COLUMNS` fields directly, so a tree model
-        can trivially reach ~100% accuracy on a random split. Use for sanity checks only, or
-        use a time split + disjoint feature policy. Prefer `label_mode='persona'` on simulated data.
+        Leakage warning: rules use ``FEATURE_COLUMNS`` directly, so a tree
+        model trivially reaches ~100% accuracy on a random split. Sanity-check
+        only; prefer ``label_mode='persona_multiclass'`` for honest metrics.
         """
         attendance_rate = row.get("attendance_rate")
         inactivity_streak_days = row.get("inactivity_streak_days") or 0
@@ -395,7 +398,11 @@ class TrainingDatasetBuilder:
             high_risk = True
         if submissions_total >= 3 and submissions_late > submissions_total / 2:
             high_risk = True
-        if active_minutes < 30 and (avg_score_30d is None or avg_score_30d < 50):
+        # avg_score_30d lives on the 0–10 scale; clamp any legacy 0–100 row.
+        score_on_10 = None
+        if avg_score_30d is not None:
+            score_on_10 = float(avg_score_30d) / 10.0 if float(avg_score_30d) > 10.5 else float(avg_score_30d)
+        if active_minutes < 30 and (score_on_10 is None or score_on_10 < 5.0):
             high_risk = True
         return int(high_risk)
 
@@ -424,12 +431,10 @@ class TrainingDatasetBuilder:
 
         personas: dict[str, str] = {}
         student_ids: set[str] | None = None
-        # Only the persona-driven label modes need a persona-membership filter.
-        # Composite mode derives the label from feature columns alone, so it
-        # must accept rows for *all* students (including real learners seeded by
-        # ``ml.data.seed_demo_cohort``, who are not present in
-        # ``elearning_raw.simulation_users``). Filtering here previously caused
-        # composite training to fail with "No training rows after filtering".
+        # Persona-driven modes filter to simulation users; composite mode
+        # derives the label from features alone and must accept rows for
+        # all students (including real learners seeded by ``ml.data.students.cohort``,
+        # who are not present in ``elearning_raw.simulation_users``).
         if label_mode in {"persona_multiclass", "persona_binary"}:
             personas = await self.load_student_personas()
             if personas:
@@ -469,7 +474,7 @@ class TrainingDatasetBuilder:
             submissions_total = rng.randint(0, 8)
             submissions_late = rng.randint(0, submissions_total) if submissions_total else 0
             active_minutes = round(rng.uniform(0, 240), 2)
-            avg_score_30d = round(rng.uniform(20, 100), 2)
+            avg_score_30d = round(rng.uniform(2.0, 10.0), 2)
             record = {
                 "user_id": f"demo-user-{index % 24}",
                 "course_id": 1000 + (index % 6),

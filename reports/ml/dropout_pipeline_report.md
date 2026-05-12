@@ -8,7 +8,7 @@
 
 ## composite
 
-- model_path: `/Users/chou/Study/TDTU/DA-CNTT/523k0002_523k0021/source_code/Source/BE/ml/models/dropout_rf_composite.joblib`
+- model_path: `/Users/chou/Study/TDTU/DA-CNTT/DuongHuuPhuoc_523k0002_523k0021/source_code/Source/BE/ml/models/dropout_rf_composite.joblib`
 - data_source: REAL_MONGO
 - status: ok
 - duration_sec: 6.443

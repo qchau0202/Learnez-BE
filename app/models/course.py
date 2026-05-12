@@ -55,10 +55,10 @@ class CourseCreate(CourseBase):
             "example": {
                 "title": "Software Engineering Fundamentals",
                 "description": "Core software engineering concepts and practices.",
-                "course_code": "SE-101",
+                "course_code": "501031",
                 "semester": 1,
                 "academic_year": "2025-2026",
-                "class_room": "A1-201",
+                "class_room": "A101",
                 "course_occurences": 15,
                 "course_session": "7:00 - 9:30",
                 "course_session_date": "Monday",

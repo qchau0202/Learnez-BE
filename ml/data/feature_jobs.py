@@ -154,9 +154,11 @@ class WeeklyFeatureAggregator:
         avg_score_30d = None
         if score_values:
             raw_avg = sum(score_values) / len(score_values)
-            # Simulation / LMS often uses 0–10; training proxy in dataset_builder expects ~0–100 scale.
-            if max(score_values) <= 10.5:
-                avg_score_30d = raw_avg * 10.0
+            # Canonical scale across the platform is TDTU 0-10. If a legacy
+            # event slipped in on the 0-100 scale, divide it down so the
+            # blended weekly average stays internally consistent.
+            if max(score_values) > 10.5:
+                avg_score_30d = raw_avg / 10.0
             else:
                 avg_score_30d = raw_avg
 
@@ -175,7 +177,7 @@ class WeeklyFeatureAggregator:
             attendance_rate=round(attendance_rate, 4) if attendance_rate is not None else None,
             absence_count=absence_count,
             inactivity_streak_days=0,
-            avg_score_30d=round(float(avg_score_30d), 4) if avg_score_30d is not None else None,
+            avg_score_30d=round(float(avg_score_30d), 2) if avg_score_30d is not None else None,
             score_trend_30d=None,
             source_event_max_time=source_event_max_time,
         )
