@@ -126,14 +126,27 @@ class RiskDriver(BaseModel):
     pct_of_considered: float
 
 
+class RiskBands(BaseModel):
+    """Calibrated thresholds used to bucket ``risk_score`` into bands.
+
+    Exposed so the UI can label cohort numbers (e.g., "≥94% = high") instead
+    of leaving readers to guess why a 0.87 score is "medium".
+    """
+
+    low_max: float = Field(ge=0.0, le=1.0)
+    medium_max: float = Field(ge=0.0, le=1.0)
+
+
 class AnalyticsOverviewResponse(BaseModel):
     students_considered: int
+    unique_students_considered: int = 0
     risk_distribution: dict[str, int]
     avg_risk_score: float
     avg_attendance_rate: float
     avg_score_30d: float
     avg_grade_10: float = 0.0
     risk_drivers: list[RiskDriver] = Field(default_factory=list)
+    risk_bands: RiskBands | None = None
     generated_at_utc: datetime
     data_source: str
 
@@ -142,6 +155,7 @@ class FacultyRiskBreakdown(BaseModel):
     faculty_id: int | None
     faculty_name: str | None
     students_considered: int
+    unique_students_considered: int = 0
     risk_distribution: dict[str, int]
     avg_risk_score: float
     avg_attendance_rate: float
@@ -154,6 +168,7 @@ class DepartmentRiskBreakdown(BaseModel):
     faculty_id: int | None
     faculty_name: str | None
     students_considered: int
+    unique_students_considered: int = 0
     risk_distribution: dict[str, int]
     avg_risk_score: float
     avg_attendance_rate: float
@@ -162,12 +177,14 @@ class DepartmentRiskBreakdown(BaseModel):
 
 class HierarchyRiskOverview(BaseModel):
     students_considered: int
+    unique_students_considered: int = 0
     risk_distribution: dict[str, int]
     avg_risk_score: float
     avg_attendance_rate: float
     avg_score_30d: float
     by_faculty: list[FacultyRiskBreakdown]
     by_department: list[DepartmentRiskBreakdown]
+    risk_bands: RiskBands | None = None
     generated_at_utc: datetime
     data_source: str
 
@@ -618,25 +635,58 @@ def _risk_doc_to_card(doc: dict[str, Any]) -> StudentRiskCard | None:
 
     metrics = doc.get("metrics") or {}
     feats = doc.get("features") or {}
-    attendance = metrics.get("attendance_rate", feats.get("attendance_rate", 0.0))
-    avg_score = metrics.get("avg_score_30d", feats.get("avg_score_30d", 0.0))
-    inactivity = metrics.get("inactivity_streak_days", feats.get("inactivity_streak_days", 0))
-    subs_total = metrics.get("submissions_total", feats.get("submissions_total", 0))
-    subs_late = metrics.get("submissions_late", feats.get("submissions_late", 0))
-    active_min = metrics.get("active_minutes", feats.get("active_minutes", 0.0))
-    logins = metrics.get("logins", feats.get("logins", 0))
+    # ``feature_ref`` is the canonical RiskScoreDocument field name (see
+    # ml/data/contracts.py). Older revisions of ``_persist_risk_cards_to_mongo``
+    # used ``metrics``; the model-output writer
+    # (``ml/training/sample_dropout_predictions.py``) uses ``feature_ref``.
+    # Falling back through all three keeps both shapes readable.
+    feature_ref = doc.get("feature_ref") or {}
+
+    def _pick(name: str, default: Any) -> Any:
+        if name in metrics:
+            return metrics[name]
+        if name in feats:
+            return feats[name]
+        if name in feature_ref:
+            return feature_ref[name]
+        return default
+
+    attendance = _pick("attendance_rate", 0.0)
+    # Defensive scale-normaliser: some seeders write avg_score_30d on a
+    # 0-100 scale, but the StudentRiskCard schema is 0-10 (canonical TDTU
+    # scale). Coerce >10.5 down to /10 so old and new feature shapes
+    # both render correctly without crashing Pydantic validation.
+    raw_score_value = float(_pick("avg_score_30d", 0.0) or 0.0)
+    avg_score = raw_score_value / 10.0 if raw_score_value > 10.5 else raw_score_value
+    avg_score = max(0.0, min(10.0, avg_score))
+    inactivity = _pick("inactivity_streak_days", 0)
+    subs_total = _pick("submissions_total", 0)
+    subs_late = _pick("submissions_late", 0)
+    active_min = _pick("active_minutes", 0.0)
+    logins = _pick("logins", 0)
+    summary_source = (
+        feats if isinstance(feats, dict) and feats
+        else feature_ref if isinstance(feature_ref, dict) and feature_ref
+        else {}
+    )
     summary = (
         str(doc.get("summary") or doc.get("explanation") or doc.get("rationale") or "").strip()
-        or _student_summary(feats if isinstance(feats, dict) else {}, raw_level)
+        or _student_summary(summary_source, raw_level)
     )
     week_start = (
         _parse_datetime_maybe(doc.get("week_start"))
         or _parse_datetime_maybe(doc.get("predicted_at"))
         or _parse_datetime_maybe(doc.get("created_at"))
+        or _parse_datetime_maybe(doc.get("computed_at"))
     )
+    raw_cid = doc.get("course_id")
+    try:
+        cid_int: int | None = int(raw_cid) if raw_cid not in (None, "", "None") else None
+    except (TypeError, ValueError):
+        cid_int = None
     return StudentRiskCard(
         student_id=uid,
-        course_id=doc.get("course_id"),
+        course_id=cid_int,
         week_start=week_start,
         risk_level=raw_level,
         risk_score=round(score, 4),
@@ -747,11 +797,16 @@ async def _load_risk_cards_from_risk_scores(
 ) -> list[StudentRiskCard]:
     end = datetime.now(timezone.utc)
     start = end - timedelta(weeks=since_weeks)
+    # ``computed_at`` is the legacy field name written by
+    # ``sample_dropout_predictions`` before it started persisting
+    # ``predicted_at`` / ``created_at`` too. Including it here means old
+    # rows are still visible to the dashboard until they get re-scored.
     q: dict[str, Any] = {
         "$or": [
             {"created_at": {"$gte": start, "$lt": end}},
             {"predicted_at": {"$gte": start, "$lt": end}},
             {"week_start": {"$gte": start, "$lt": end}},
+            {"computed_at": {"$gte": start, "$lt": end}},
         ]
     }
     if course_id is not None:
@@ -763,7 +818,12 @@ async def _load_risk_cards_from_risk_scores(
     docs = await (
         db["risk_scores"]
         .find(q)
-        .sort([("created_at", -1), ("predicted_at", -1), ("week_start", -1)])
+        .sort([
+            ("created_at", -1),
+            ("predicted_at", -1),
+            ("computed_at", -1),
+            ("week_start", -1),
+        ])
         .to_list(length=max(max_users * 8, 1000))
     )
     latest_by_user_course: dict[tuple[str, int | None], StudentRiskCard] = {}
@@ -1133,28 +1193,45 @@ def _filter_cards_by_org(
 
 
 def _aggregate_distribution(cards: list[StudentRiskCard]) -> dict[str, Any]:
+    """Roll up a list of (student, course) risk cards into cohort metrics.
+
+    ``students_considered`` keeps the historical meaning (row count, i.e. one
+    per student/course) so callers that already read it don't break.
+    ``unique_students_considered`` is the distinct ``student_id`` count and
+    is what the UI should label as "students" — a student enrolled in five
+    courses should only count once on the dashboard headline.
+    """
     risk_dist = {"low": 0, "medium": 0, "high": 0}
     scores: list[float] = []
     attendance_vals: list[float] = []
     grade_vals: list[float] = []
+    unique_ids: set[str] = set()
     for c in cards:
         risk_dist[c.risk_level] = risk_dist.get(c.risk_level, 0) + 1
         scores.append(float(c.risk_score))
         attendance_vals.append(float(c.attendance_rate))
         grade_vals.append(float(c.avg_score_30d))
+        if c.student_id:
+            unique_ids.add(c.student_id)
     # ``avg_score_30d`` already lives on the canonical TDTU 0-10 scale (see
     # ``feature_jobs.WeeklyFeatureAggregator``). ``avg_grade_10`` is kept as
-    # an alias so older UI code that reads it doesn't break, but it's no
-    # longer a rescale — both fields carry the same value.
+    # an alias so older UI code that reads it doesn't break.
     cohort_avg = round(float(mean(grade_vals)), 2) if grade_vals else 0.0
     return {
         "students_considered": len(cards),
+        "unique_students_considered": len(unique_ids),
         "risk_distribution": risk_dist,
         "avg_risk_score": round(float(mean(scores)), 4) if scores else 0.0,
         "avg_attendance_rate": round(float(mean(attendance_vals)), 4) if attendance_vals else 0.0,
         "avg_score_30d": cohort_avg,
         "avg_grade_10": cohort_avg,
     }
+
+
+def _current_risk_bands() -> RiskBands:
+    """Read the calibrated low/medium thresholds from disk in one place."""
+    low_max, med_max = load_thresholds(_THRESHOLDS_PATH)
+    return RiskBands(low_max=round(low_max, 4), medium_max=round(med_max, 4))
 
 
 def _compute_risk_drivers(cards: list[StudentRiskCard]) -> list[RiskDriver]:
@@ -1743,12 +1820,14 @@ async def get_analytics_overview(
     drivers = _compute_risk_drivers(cards)
     return AnalyticsOverviewResponse(
         students_considered=agg["students_considered"],
+        unique_students_considered=agg["unique_students_considered"],
         risk_distribution=agg["risk_distribution"],
         avg_risk_score=agg["avg_risk_score"],
         avg_attendance_rate=agg["avg_attendance_rate"],
         avg_score_30d=agg["avg_score_30d"],
         avg_grade_10=agg["avg_grade_10"],
         risk_drivers=drivers,
+        risk_bands=_current_risk_bands(),
         generated_at_utc=datetime.now(timezone.utc),
         data_source=source,
     )
@@ -1831,6 +1910,7 @@ async def get_dropout_by_hierarchy(
                 faculty_id=fid,
                 faculty_name=fac_names.get(fid),
                 students_considered=a["students_considered"],
+                unique_students_considered=a["unique_students_considered"],
                 risk_distribution=a["risk_distribution"],
                 avg_risk_score=a["avg_risk_score"],
                 avg_attendance_rate=a["avg_attendance_rate"],
@@ -1860,6 +1940,7 @@ async def get_dropout_by_hierarchy(
                     faculty_id=fac_pair[0],
                     faculty_name=fac_pair[1],
                     students_considered=a["students_considered"],
+                    unique_students_considered=a["unique_students_considered"],
                     risk_distribution=a["risk_distribution"],
                     avg_risk_score=a["avg_risk_score"],
                     avg_attendance_rate=a["avg_attendance_rate"],
@@ -1872,12 +1953,14 @@ async def get_dropout_by_hierarchy(
 
     return HierarchyRiskOverview(
         students_considered=overall["students_considered"],
+        unique_students_considered=overall["unique_students_considered"],
         risk_distribution=overall["risk_distribution"],
         avg_risk_score=overall["avg_risk_score"],
         avg_attendance_rate=overall["avg_attendance_rate"],
         avg_score_30d=overall["avg_score_30d"],
         by_faculty=by_faculty,
         by_department=by_department,
+        risk_bands=_current_risk_bands(),
         generated_at_utc=datetime.now(timezone.utc),
         data_source=source,
     )

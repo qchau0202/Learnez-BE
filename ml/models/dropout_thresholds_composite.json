@@ -1,14 +1,14 @@
 {
-  "calibrated_at_utc": "2026-05-08T09:45:08.721285+00:00",
+  "calibrated_at_utc": "2026-05-12T19:08:53.089324+00:00",
   "model_path": "ml/models/dropout_rf_composite.joblib",
-  "rows_used": 25,
-  "q_low": 0.2,
-  "q_medium": 0.55,
-  "low_max": 0.508833,
-  "medium_max": 0.939969,
+  "rows_used": 110,
+  "q_low": 0.5,
+  "q_medium": 0.85,
+  "low_max": 0.930293,
+  "medium_max": 0.982905,
   "distribution_after_calibration": {
-    "low": 8,
-    "medium": 14,
+    "low": 55,
+    "medium": 52,
     "high": 3
   }
 }
