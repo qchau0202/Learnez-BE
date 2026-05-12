@@ -1,14 +1,21 @@
-"""Baseline dropout-risk training using the weekly MongoDB feature layer.
+"""Baseline dropout-risk model + CLI trainer.
 
-The first model is intentionally simple: a Random Forest trained on weekly
-feature snapshots with a proxy label. This gives the project a working baseline
-before a true dropout outcome label is available.
+Intentionally simple first model: a Random Forest trained on weekly
+feature snapshots with the label mode chosen at training time. This
+gives the project a working baseline before a true dropout outcome
+label is available.
+
+Run via::
+
+    python -m ml.training.dropout_predictor --since-weeks 20 --label-mode composite
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import argparse
 import asyncio
+import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -17,7 +24,15 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report, roc_auc_score
 from sklearn.model_selection import train_test_split
 
-from .dataset_builder import FEATURE_COLUMNS, TrainingDatasetBuilder, TrainingFrame, clean_training_rows
+if __package__ in {None, ""}:
+    sys.path.append(str(Path(__file__).resolve().parents[2]))
+
+from .dataset_builder import (
+    FEATURE_COLUMNS,
+    TrainingDatasetBuilder,
+    TrainingFrame,
+    clean_training_rows,
+)
 
 
 @dataclass(slots=True)
@@ -28,11 +43,14 @@ class TrainResult:
 
 
 class DropoutRiskTrainer:
-    """Train and persist the first dropout-risk classifier."""
+    """Train and persist the dropout-risk classifier."""
 
     def __init__(self, model_path: str | Path | None = None) -> None:
         self.dataset_builder = TrainingDatasetBuilder()
-        self.model_path = Path(model_path or Path(__file__).resolve().parents[1] / "models" / "dropout_rf_composite.joblib")
+        self.model_path = Path(
+            model_path
+            or Path(__file__).resolve().parents[1] / "models" / "dropout_rf_composite.joblib"
+        )
         self.model_path.parent.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
@@ -46,9 +64,7 @@ class DropoutRiskTrainer:
 
     @staticmethod
     def _time_based_split(
-        frame: TrainingFrame,
-        *,
-        test_size: float = 0.25,
+        frame: TrainingFrame, *, test_size: float = 0.25,
     ) -> tuple[list[list[float]], list[list[float]], list[int], list[int]]:
         """Hold out the latest calendar weeks for test (reduces leakage across correlated weekly rows)."""
         rows = frame.rows
@@ -68,9 +84,7 @@ class DropoutRiskTrainer:
 
     @staticmethod
     def _prepare_xy_static(
-        rows: list[dict],
-        feature_columns: list[str],
-        label_column: str,
+        rows: list[dict], feature_columns: list[str], label_column: str,
     ) -> tuple[list[list[float]], list[int]]:
         cleaned_rows, _ = clean_training_rows(rows, feature_columns, label_column)
         features: list[list[float]] = []
@@ -102,7 +116,9 @@ class DropoutRiskTrainer:
             label_mode = "composite"
         else:
             frame = asyncio.run(
-                self.dataset_builder.build_training_dataframe(since_weeks=since_weeks, label_mode=label_mode)
+                self.dataset_builder.build_training_dataframe(
+                    since_weeks=since_weeks, label_mode=label_mode
+                )
             )
         if not frame.rows:
             raise RuntimeError("No training rows after filtering; check Mongo feature data and label_mode.")
@@ -112,19 +128,13 @@ class DropoutRiskTrainer:
             if len(x_test) == 0 or len(x_train) == 0:
                 x, y = self._prepare_xy(frame)
                 x_train, x_test, y_train, y_test = train_test_split(
-                    x,
-                    y,
-                    test_size=0.25,
-                    random_state=random_state,
+                    x, y, test_size=0.25, random_state=random_state,
                     stratify=y if len(set(y)) > 1 else None,
                 )
         else:
             x, y = self._prepare_xy(frame)
             x_train, x_test, y_train, y_test = train_test_split(
-                x,
-                y,
-                test_size=0.25,
-                random_state=random_state,
+                x, y, test_size=0.25, random_state=random_state,
                 stratify=y if len(set(y)) > 1 else None,
             )
 
@@ -166,3 +176,68 @@ class DropoutRiskTrainer:
 
     def load(self) -> RandomForestClassifier:
         return joblib.load(self.model_path)
+
+
+# ---------- CLI ---------- #
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Train the baseline dropout-risk model from MongoDB features."
+    )
+    parser.add_argument("--since-weeks", type=int, default=12,
+                        help="Number of recent weeks to use from student_weekly_features.")
+    parser.add_argument("--model-path", type=Path, default=None,
+                        help="Optional path to save the trained joblib model.")
+    parser.add_argument("--demo-data", action="store_true",
+                        help="Train on deterministic synthetic data if MongoDB is unavailable.")
+    parser.add_argument(
+        "--label-mode",
+        choices=("composite", "persona_multiclass", "persona_binary", "persona", "proxy"),
+        default="composite",
+        help=(
+            "composite (default): 3-way risk from academics+engagement+attendance with academic rescue. "
+            "persona_multiclass: 6-class archetype (best for low feature-label leakage). "
+            "persona_binary/persona: high/low risk. "
+            "proxy: legacy heuristic (artificially strong metrics)."
+        ),
+    )
+    parser.add_argument(
+        "--split",
+        choices=("time", "random"),
+        default="time",
+        help="time: hold out latest weeks. random: stratified shuffle (may be optimistic).",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    trainer = DropoutRiskTrainer(model_path=args.model_path)
+    result = trainer.train(
+        since_weeks=args.since_weeks,
+        demo_data=args.demo_data,
+        label_mode=args.label_mode,
+        split=args.split,
+    )
+
+    print(f"trained model saved to: {trainer.model_path}")
+    print(
+        "data source: synthetic demo dataset"
+        if args.demo_data
+        else f"data source: MongoDB student_weekly_features | label_mode={args.label_mode} | split={args.split}"
+    )
+    if args.label_mode == "proxy":
+        print("note: proxy mode is a strict feature→label rule — metrics can look artificially strong.")
+    if args.label_mode == "composite" and not args.demo_data:
+        print(
+            "note: composite uses multi-factor rules (incl. academic rescue). "
+            "For archetype prediction without feature-derived labels, try --label-mode persona_multiclass."
+        )
+    for key, value in result.metrics.items():
+        print(f"{key}: {value}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

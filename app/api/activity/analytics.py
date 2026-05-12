@@ -7,11 +7,14 @@ why a student got a given recommendation or risk level.
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from statistics import mean
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from joblib import load as joblib_load
@@ -21,6 +24,18 @@ from app.api.deps import AiDbDep
 from app.core.database import get_supabase
 from app.core.dependencies import ROLE_MAP
 from app.core.supabase_cache import DYNAMIC_CACHE, STATIC_CACHE, is_miss
+from app.services.ai import path_intake_service, path_picks_service
+from app.services.ai.path_intake_service import (
+    IntakeAlreadyConfirmed,
+    IntakeInvalidAnswer,
+    IntakeNotFound,
+    IntakeSession,
+)
+from app.services.ai.path_picks_service import (
+    CourseNotInCatalog,
+    PathPickNotFound,
+    PathPickRemovalForbidden,
+)
 from app.services.notifications.scenario_notifications import parse_iso_datetime
 from ml.training.dataset_builder import FEATURE_COLUMNS
 from ml.training.risk_bands import load_thresholds, risk_level_from_score, score_from_probabilities
@@ -74,11 +89,15 @@ class StudentRiskCard(BaseModel):
     risk_level: str
     risk_score: float = Field(ge=0.0, le=1.0)
     avg_score_30d: float = Field(
-        description="Average graded score on the 0-100 scale (rescaled from 0-10 LMS source)."
+        description="Average graded score on the canonical TDTU 0-10 scale.",
+        ge=0.0,
+        le=10.0,
     )
     avg_grade_10: float = Field(
         default=0.0,
-        description="Same metric on the 0-10 scale used by the UI grade column.",
+        description="Alias of avg_score_30d for backward compatibility (also 0-10).",
+        ge=0.0,
+        le=10.0,
     )
     attendance_rate: float
     inactivity_streak_days: int
@@ -238,8 +257,8 @@ class StudentBehaviorGradedRow(BaseModel):
     course_id: int
     course_code: str | None = None
     course_name: str
-    latest_avg: float = Field(ge=0.0, le=100.0)
-    delta_pts: int
+    latest_avg: float = Field(ge=0.0, le=10.0)
+    delta_pts: float = Field(description="Latest minus earliest weekly average on the 0-10 scale.")
     completion_pct: int = Field(ge=0, le=100)
     avg_grade_10: float = Field(ge=0.0, le=10.0)
 
@@ -338,6 +357,11 @@ class StudentPathCourse(BaseModel):
     * ``completed`` — graded and finished
     * ``in_progress`` — currently running
     * ``upcoming`` — enrolled but not started yet
+
+    ``can_remove`` is *server-authoritative*: the UI must rely on this flag
+    rather than re-deriving the rule on the client. A row is locked
+    (``can_remove=false``) when the course is completed **and** the student
+    has a final-graded submission contributing to GPA.
     """
 
     id: str
@@ -349,6 +373,8 @@ class StudentPathCourse(BaseModel):
     academic_year: str | None = None
     alternatives: list[StudentPathAlternative]
     recommendation: StudentPathRecommendation | None = None
+    can_remove: bool = True
+    locked_reason: str | None = None
 
 
 class StudentPathNextStep(BaseModel):
@@ -356,6 +382,10 @@ class StudentPathNextStep(BaseModel):
 
     Surfaced in a dedicated "Recommended next" section instead of being
     mixed into the personal path — the student decides whether to enroll.
+
+    ``is_picked`` lets the UI render an "Already in your path" badge
+    (and disable the Add button) for courses the student has previously
+    added via :func:`add_learning_path_pick`.
     """
 
     course_id: int
@@ -364,6 +394,7 @@ class StudentPathNextStep(BaseModel):
     semester: int | None = None
     academic_year: str | None = None
     reason: str
+    is_picked: bool = False
 
 
 class StudentPathHeader(BaseModel):
@@ -374,14 +405,117 @@ class StudentPathHeader(BaseModel):
     progress: int = Field(ge=0, le=100)
 
 
+class StudentLearningPathPick(BaseModel):
+    """One persisted "Add to my path" entry from ``learnez_ai.student_path_picks``."""
+
+    course_id: int
+    code: str | None = None
+    name: str | None = None
+    source: str = "manual"
+    added_at: datetime
+    can_remove: bool = True
+    locked_reason: str | None = None
+
+
 class StudentLearningPathResponse(BaseModel):
     student_id: str
     path: StudentPathHeader
     courses: list[StudentPathCourse]
     next_steps: list[StudentPathNextStep] = Field(default_factory=list)
     enrolled_courses: list[StudentCourseSummary]
+    personal_picks: list[StudentLearningPathPick] = Field(default_factory=list)
     generated_at_utc: datetime
     data_source: str
+    # Lifecycle flags surfaced to the UI so it can pick the right card to
+    # render. ``has_saved_path`` true → render the regular path UI;
+    # false → render the "Build my learning path" CTA. ``intake_session``
+    # is populated when the student is mid-wizard (their reload shouldn't
+    # lose progress).
+    has_saved_path: bool = False
+    saved_path: SavedLearningPathApi | None = None
+    intake_session: IntakeSessionApi | None = None
+
+
+class IntakeOptionApi(BaseModel):
+    id: str
+    label: str
+    description: str | None = None
+
+
+class IntakeQuestionApi(BaseModel):
+    id: str
+    prompt: str
+    subtitle: str
+    input_type: str
+    min_select: int
+    max_select: int
+    options: list[IntakeOptionApi]
+
+
+class IntakePlanCourseApi(BaseModel):
+    course_id: int | None = None
+    course_code: str
+    title: str
+    status: str  # "completed" | "in_progress" | "upcoming"
+    semester: int | None = None
+    academic_year: str | None = None
+    rationale: str
+
+
+class IntakePreviewHeaderApi(BaseModel):
+    name: str
+    description: str
+    track: str | None = None
+    completed_count: int = 0
+    total_count: int = 0
+
+
+class IntakeSessionApi(BaseModel):
+    """Snapshot of one intake conversation, as returned to the UI wizard."""
+
+    session_id: str
+    user_id: str
+    status: str  # "asking" | "ready" | "confirmed" | "cancelled"
+    next_question: IntakeQuestionApi | None = None
+    answers: dict[str, list[str]] = Field(default_factory=dict)
+    progress: int = 0
+    total_questions: int
+    preview: list[IntakePlanCourseApi] | None = None
+    preview_header: IntakePreviewHeaderApi | None = None
+    created_at: datetime
+    expires_at: datetime | None = None
+
+
+class IntakeAnswerRequest(BaseModel):
+    question_id: str
+    selected: list[str] = Field(default_factory=list)
+
+
+class SavedLearningPathApi(BaseModel):
+    """Confirmed learning path (one ``active`` per student)."""
+
+    user_id: str
+    status: str
+    path_version: str
+    intake_id: str | None = None
+    header: IntakePreviewHeaderApi | None = None
+    courses: list[IntakePlanCourseApi] = Field(default_factory=list)
+    confirmed_at: datetime | None = None
+    generated_at: datetime | None = None
+
+
+class StudentLearningPathPickRequest(BaseModel):
+    """Request body for ``POST /analytics/student/learning-path/picks``."""
+
+    course_id: int = Field(ge=1)
+    source: str = Field(default="manual", pattern=r"^(ai|manual)$")
+
+
+class StudentLearningPathPickResponse(BaseModel):
+    """Response body for the add endpoint."""
+
+    pick: StudentLearningPathPick
+    summary: dict[str, Any] = Field(default_factory=dict)
 
 
 @lru_cache(maxsize=1)
@@ -515,6 +649,92 @@ def _risk_doc_to_card(doc: dict[str, Any]) -> StudentRiskCard | None:
         logins=int(logins or 0),
         summary=summary,
     )
+
+
+_RISK_MODEL_VERSION = "rf_composite_v1"
+
+
+def _date_floor(value: datetime) -> datetime:
+    """Truncate a UTC datetime to its date for ``(user, course, day)`` keys."""
+    return datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
+
+
+async def _persist_risk_cards_to_mongo(
+    db: AiDbDep,
+    cards: list[StudentRiskCard],
+    *,
+    source: str,
+) -> None:
+    """Upsert live-computed risk cards into ``learnez_ai.risk_scores``.
+
+    The reader path (`_load_risk_cards_from_risk_scores`) prefers stored
+    rows, so persisting here turns the next request into an O(1) lookup
+    instead of re-running the model. Keyed by (user, course, day) — we
+    overwrite within the same day rather than accumulating duplicates.
+
+    Called only when ``source == "weekly_features_fallback"`` (i.e. we
+    *just* computed live values that weren't already in Mongo).
+    Cancellation- and exception-safe: any failure is logged and swallowed
+    so the user request never fails because of cache write issues.
+    """
+    if source != "weekly_features_fallback" or not cards:
+        return
+    now = datetime.now(timezone.utc)
+    day = _date_floor(now)
+    try:
+        from pymongo import UpdateOne
+
+        ops: list[UpdateOne] = []
+        for c in cards:
+            doc = {
+                "user_id": c.student_id,
+                "course_id": c.course_id,
+                "computed_at": now,
+                "predicted_at": now,
+                "computed_day": day,
+                "week_start": c.week_start,
+                "risk_level": c.risk_level,
+                "risk_score": float(c.risk_score),
+                "model_version": _RISK_MODEL_VERSION,
+                "source": source,
+                "metrics": {
+                    "avg_score_30d": float(c.avg_score_30d),
+                    "attendance_rate": float(c.attendance_rate),
+                    "inactivity_streak_days": int(c.inactivity_streak_days),
+                    "submissions_total": int(c.submissions_total),
+                    "submissions_late": int(c.submissions_late),
+                    "active_minutes": float(c.active_minutes),
+                    "logins": int(c.logins),
+                },
+                "summary": c.summary,
+                "updated_at": now,
+            }
+            ops.append(
+                UpdateOne(
+                    {
+                        "user_id": c.student_id,
+                        "course_id": c.course_id,
+                        "computed_day": day,
+                        "model_version": _RISK_MODEL_VERSION,
+                    },
+                    {"$set": doc, "$setOnInsert": {"created_at": now}},
+                    upsert=True,
+                )
+            )
+        if ops:
+            await db["risk_scores"].bulk_write(ops, ordered=False)
+    except Exception:  # noqa: BLE001 — persistence is best-effort
+        logger.exception("Failed to persist %d live risk cards", len(cards))
+
+
+# NOTE: a previous revision auto-snapshotted the live-computed
+# learning-path payload into ``learnez_ai.learning_paths`` on every GET.
+# That violated the new product rule: paths are saved *only* when the
+# student confirms the AI intake wizard. The intake service
+# (``app.services.ai.path_intake_service.confirm_intake``) is now the sole
+# writer of saved paths. The snapshot helper has been removed
+# accordingly — see ``clear_learning_paths`` if you need to wipe old
+# auto-generated rows that pre-date the rule.
 
 
 async def _load_risk_cards_from_risk_scores(
@@ -855,7 +1075,7 @@ async def _annotate_cards_with_org(cards: list[StudentRiskCard]) -> list[Student
         c.faculty_name = meta.get("faculty_name")
         c.department_id = meta.get("department_id")
         c.department_name = meta.get("department_name")
-        c.avg_grade_10 = round(float(c.avg_score_30d) / 10.0, 2)
+        c.avg_grade_10 = round(float(c.avg_score_30d), 2)
         if isinstance(c.course_id, int):
             cm = course_meta.get(int(c.course_id)) or {}
             c.course_code = cm.get("course_code")
@@ -922,14 +1142,18 @@ def _aggregate_distribution(cards: list[StudentRiskCard]) -> dict[str, Any]:
         scores.append(float(c.risk_score))
         attendance_vals.append(float(c.attendance_rate))
         grade_vals.append(float(c.avg_score_30d))
-    avg_score_100 = round(float(mean(grade_vals)), 4) if grade_vals else 0.0
+    # ``avg_score_30d`` already lives on the canonical TDTU 0-10 scale (see
+    # ``feature_jobs.WeeklyFeatureAggregator``). ``avg_grade_10`` is kept as
+    # an alias so older UI code that reads it doesn't break, but it's no
+    # longer a rescale — both fields carry the same value.
+    cohort_avg = round(float(mean(grade_vals)), 2) if grade_vals else 0.0
     return {
         "students_considered": len(cards),
         "risk_distribution": risk_dist,
         "avg_risk_score": round(float(mean(scores)), 4) if scores else 0.0,
         "avg_attendance_rate": round(float(mean(attendance_vals)), 4) if attendance_vals else 0.0,
-        "avg_score_30d": avg_score_100,
-        "avg_grade_10": round(avg_score_100 / 10.0, 2),
+        "avg_score_30d": cohort_avg,
+        "avg_grade_10": cohort_avg,
     }
 
 
@@ -1046,7 +1270,8 @@ def _student_summary(features: dict[str, Any], risk_level: str) -> str:
         return "High risk due to low academics/engagement trend; intervention recommended this week."
     if risk_level == "medium":
         return "Moderate risk; monitor attendance and submissions closely over next 1-2 weeks."
-    if avg_score >= 75 and attendance >= 0.8 and inactivity <= 2:
+    avg_score_10 = avg_score / 10.0 if avg_score > 10.5 else avg_score
+    if avg_score_10 >= 7.5 and attendance >= 0.8 and inactivity <= 2:
         return "Low risk with stable learning habits and strong performance."
     return "Low risk currently, continue monitoring weekly behavior trend."
 
@@ -1381,7 +1606,9 @@ def _student_overview_stats(
 
 
 def _score_competency(rows: list[dict[str, Any]]) -> list[CompetencyDimension]:
-    academic = 0.5 * min(_avg_feature(rows, "avg_score_30d") / 100.0, 1.0) + 0.5 * min(
+    avg_score_raw = _avg_feature(rows, "avg_score_30d")
+    score_divisor = 100.0 if avg_score_raw > 10.5 else 10.0
+    academic = 0.5 * min(avg_score_raw / score_divisor, 1.0) + 0.5 * min(
         _avg_feature(rows, "submissions_on_time") / max(_avg_feature(rows, "submissions_total"), 1.0), 1.0
     )
     engagement = mean(
@@ -1460,6 +1687,10 @@ async def _load_all_risk_cards(
                 )
             )
         source = "weekly_features_fallback"
+        # Cache the live computation back into ``risk_scores`` so subsequent
+        # requests skip the model entirely. Fire-and-forget — a write
+        # failure must never break the user request.
+        await _persist_risk_cards_to_mongo(db, cards, source=source)
 
     # Annotation and the enrollment-pair lookup are independent — fire
     # them in parallel so the slower of the two becomes the floor
@@ -2148,8 +2379,8 @@ def _build_behavior_graded_summary(
                 course_id=course.id,
                 course_code=course.course_code,
                 course_name=course.title,
-                latest_avg=round(latest_avg, 1),
-                delta_pts=int(round(latest_avg - first_avg)),
+                latest_avg=round(latest_avg, 2),
+                delta_pts=round(latest_avg - first_avg, 2),
                 completion_pct=completion_pct.get(course.id, 0),
                 avg_grade_10=avg_10,
             )
@@ -2481,7 +2712,13 @@ def _build_risk_factors(
     """Map weekly aggregates onto the five user-visible risk factors."""
     factors: list[StudentRiskFactor] = []
 
-    academic = int(round(max(0.0, min(100.0, float(avg_features.get("avg_score_30d") or 0.0)))))
+    # ``avg_score_30d`` is persisted on the TDTU 10-point scale; the risk-factor
+    # gauges render as a 0-100 percentage so we scale it up here. (Historical
+    # rows that were written on the 0-100 scale clamp to 100 and still look
+    # correct in the UI, just without the post-rescale rounding nuance.)
+    raw_avg_score = float(avg_features.get("avg_score_30d") or 0.0)
+    academic_pct = raw_avg_score * 10.0 if raw_avg_score <= 10.0 else raw_avg_score
+    academic = int(round(max(0.0, min(100.0, academic_pct))))
     factors.append(
         StudentRiskFactor(
             name="Academic Performance",
@@ -3271,6 +3508,21 @@ async def get_student_learning_path(
     # isn't confusing. ``alt_used_ids`` keeps swap suggestions distinct
     # across path entries, ``rec_used_ids`` does the same for the
     # remedial / accelerated suggestion lists.
+    # ----------------------------- Persisted picks ------------------------ #
+    # Fetch the student's Mongo-stored learning-path picks *before* we build
+    # the response so we can:
+    #   1. Stamp ``is_picked=True`` on next-step suggestions the student
+    #      has already accepted.
+    #   2. Render the dedicated "Personal picks" section.
+    # If Mongo is unreachable we degrade gracefully — the rest of the path
+    # is still useful, only the personal-picks list goes empty.
+    try:
+        active_picks = await path_picks_service.list_active_picks(student_id)
+    except Exception:  # noqa: BLE001 — log + degrade, never crash the page
+        logger.exception("Failed to load learning-path picks for %s", student_id)
+        active_picks = []
+    picked_ids: set[int] = {p.course_id for p in active_picks}
+
     alt_used_ids: set[int] = set()
     rec_used_ids: set[int] = set()
     path_courses: list[StudentPathCourse] = []
@@ -3286,6 +3538,13 @@ async def get_student_learning_path(
             catalog=catalog_sorted,
             used_ids=rec_used_ids,
         )
+        # A row is locked when the course is finished *and* contributed a
+        # graded submission to the cumulative GPA. We piggyback on
+        # ``avg_grade_per_course`` (already computed above) to avoid an
+        # extra Supabase round-trip per course.
+        is_completed = bool(row.get("is_complete")) or status == "completed"
+        has_grade = bool(avg_g and avg_g > 0)
+        locked = is_completed and has_grade
         path_courses.append(
             StudentPathCourse(
                 id=f"enrolled-{cid}",
@@ -3299,6 +3558,8 @@ async def get_student_learning_path(
                     row, catalog_sorted, used_ids=alt_used_ids,
                 ),
                 recommendation=recommendation,
+                can_remove=not locked,
+                locked_reason="completed_with_grade" if locked else None,
             )
         )
 
@@ -3352,6 +3613,7 @@ async def get_student_learning_path(
                 semester=sem,
                 academic_year=cand.get("academic_year"),
                 reason=reason,
+                is_picked=cid in picked_ids,
             )
         )
 
@@ -3392,14 +3654,124 @@ async def get_student_learning_path(
     else:
         data_source = "empty"
 
-    return StudentLearningPathResponse(
+    # Picks that point at *already-enrolled* courses are redundant — the
+    # student is seeing them in the main course list anyway. Surface only
+    # genuinely external picks (i.e. catalog courses they pinned but
+    # haven't enrolled in yet) in the "Personal picks" section.
+    personal_picks = [
+        StudentLearningPathPick(
+            course_id=p.course_id,
+            code=p.course_code,
+            name=p.title,
+            source=p.source,
+            added_at=p.added_at,
+            can_remove=p.can_remove,
+            locked_reason=p.locked_reason,
+        )
+        for p in active_picks
+        if p.course_id not in enrolled_id_set
+    ]
+
+    # Lifecycle: surface intake/saved-path state so the UI knows whether to
+    # render the wizard CTA, the wizard mid-flow, or the regular path.
+    # Per product spec, the path **does not** get persisted on read — it
+    # is only saved when the student explicitly confirms the wizard
+    # preview. Failures are degraded silently so the rest of the response
+    # still renders.
+    saved_path_doc: dict[str, Any] | None = None
+    intake_payload: IntakeSessionApi | None = None
+    try:
+        saved_path_doc = await path_intake_service.get_active_saved_path(user_id=student_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to load saved learning path for %s", student_id)
+    try:
+        latest = await path_intake_service.latest_active_session(user_id=student_id)
+        intake_payload = _intake_session_to_api(latest) if latest else None
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to load active intake session for %s", student_id)
+
+    if saved_path_doc is not None:
+        # We always *display* the live-computed path (it reflects fresh
+        # enrollments) but tag it as "real" only when a saved plan also
+        # exists. The saved plan is exposed verbatim alongside so the UI
+        # can decide which one to anchor on.
+        saved_path_api = _saved_path_to_api(saved_path_doc)
+    else:
+        saved_path_api = None
+        # No saved path → tell the UI to surface the wizard CTA.
+        data_source = "needs_intake"
+
+    response = StudentLearningPathResponse(
         student_id=student_id,
         path=header,
         courses=path_courses,
         next_steps=next_steps,
+        personal_picks=personal_picks,
         enrolled_courses=enrolled_summary,
         generated_at_utc=datetime.now(timezone.utc),
         data_source=data_source,
+        has_saved_path=saved_path_doc is not None,
+        saved_path=saved_path_api,
+        intake_session=intake_payload,
+    )
+    return response
+
+
+def _intake_session_to_api(session: IntakeSession) -> IntakeSessionApi:
+    """Adapt the service-layer dataclass to the Pydantic response model."""
+    raw = session.to_dict()
+    next_q_raw = raw.get("next_question")
+    next_q = IntakeQuestionApi.model_validate(next_q_raw) if next_q_raw else None
+    preview_raw = raw.get("preview")
+    preview = (
+        [IntakePlanCourseApi.model_validate(p) for p in preview_raw]
+        if preview_raw is not None
+        else None
+    )
+    preview_header_raw = raw.get("preview_header")
+    preview_header = (
+        IntakePreviewHeaderApi.model_validate(preview_header_raw)
+        if preview_header_raw
+        else None
+    )
+    return IntakeSessionApi(
+        session_id=raw["session_id"],
+        user_id=raw["user_id"],
+        status=raw["status"],
+        next_question=next_q,
+        answers={k: list(v or []) for k, v in (raw.get("answers") or {}).items()},
+        progress=int(raw.get("progress") or 0),
+        total_questions=int(raw.get("total_questions") or 0),
+        preview=preview,
+        preview_header=preview_header,
+        created_at=(
+            datetime.fromisoformat(raw["created_at"])
+            if isinstance(raw["created_at"], str)
+            else raw["created_at"]
+        ),
+        expires_at=(
+            datetime.fromisoformat(raw["expires_at"])
+            if isinstance(raw.get("expires_at"), str) and raw.get("expires_at")
+            else raw.get("expires_at")
+        ),
+    )
+
+
+def _saved_path_to_api(doc: dict[str, Any]) -> SavedLearningPathApi:
+    """Map the Mongo ``learning_paths`` doc onto the Pydantic response shape."""
+    courses_raw = doc.get("courses") or []
+    courses = [IntakePlanCourseApi.model_validate(c) for c in courses_raw]
+    header_raw = doc.get("header") or None
+    header = IntakePreviewHeaderApi.model_validate(header_raw) if header_raw else None
+    return SavedLearningPathApi(
+        user_id=str(doc.get("user_id") or ""),
+        status=str(doc.get("status") or "active"),
+        path_version=str(doc.get("path_version") or "v1"),
+        intake_id=doc.get("intake_id"),
+        header=header,
+        courses=courses,
+        confirmed_at=doc.get("confirmed_at"),
+        generated_at=doc.get("generated_at"),
     )
 
 
@@ -3442,6 +3814,245 @@ async def get_competency_analysis(
         weaknesses=weaknesses,
         summary=summary,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Learning-path picks (student-owned wishlist)                                 #
+# --------------------------------------------------------------------------- #
+#
+# Three endpoints back the Add/Remove buttons in the Learning Path tab. They
+# all hang off ``/analytics/student/learning-path/picks`` so they share the
+# bearer-auth gate and the student-only role check.
+
+
+def _require_student(request: Request) -> str:
+    """Auth helper — only the logged-in student can mutate their own picks."""
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthenticated")
+    role_name = ROLE_MAP.get(user.get("role_id"))
+    if role_name != "Student":
+        raise HTTPException(status_code=403, detail="Student-only endpoint")
+    student_id = str(user.get("user_id") or "").strip()
+    if not student_id:
+        raise HTTPException(status_code=401, detail="Unauthenticated")
+    return student_id
+
+
+@router.get(
+    "/student/learning-path/picks",
+    response_model=list[StudentLearningPathPick],
+)
+async def list_learning_path_picks(request: Request):
+    """Return every active personal pick for the logged-in student."""
+    student_id = _require_student(request)
+    picks = await path_picks_service.list_active_picks(student_id)
+    return [
+        StudentLearningPathPick(
+            course_id=p.course_id,
+            code=p.course_code,
+            name=p.title,
+            source=p.source,
+            added_at=p.added_at,
+            can_remove=p.can_remove,
+            locked_reason=p.locked_reason,
+        )
+        for p in picks
+    ]
+
+
+@router.post(
+    "/student/learning-path/picks",
+    response_model=StudentLearningPathPickResponse,
+    status_code=201,
+)
+async def add_learning_path_pick(
+    body: StudentLearningPathPickRequest,
+    request: Request,
+):
+    """Pin a catalog course to the student's personal path.
+
+    Idempotent: re-adding an existing pick refreshes ``added_at`` but
+    doesn't fail. Reviving a previously-removed pick is also supported.
+    """
+    student_id = _require_student(request)
+    try:
+        pick = await path_picks_service.add_pick(
+            user_id=student_id,
+            course_id=int(body.course_id),
+            source=body.source,
+        )
+    except CourseNotInCatalog as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    summary = await path_picks_service.picks_summary(student_id)
+    return StudentLearningPathPickResponse(
+        pick=StudentLearningPathPick(
+            course_id=pick.course_id,
+            code=pick.course_code,
+            name=pick.title,
+            source=pick.source,
+            added_at=pick.added_at,
+            can_remove=pick.can_remove,
+            locked_reason=pick.locked_reason,
+        ),
+        summary=summary,
+    )
+
+
+@router.delete(
+    "/student/learning-path/picks/{course_id}",
+    status_code=204,
+)
+async def remove_learning_path_pick(
+    course_id: int,
+    request: Request,
+):
+    """Soft-remove a personal pick.
+
+    Returns ``409 Conflict`` if the student tries to remove a completed
+    course they already have a final grade for — those are GPA-bearing and
+    locked. ``404`` if the pick simply doesn't exist.
+    """
+    student_id = _require_student(request)
+    try:
+        await path_picks_service.remove_pick(
+            user_id=student_id,
+            course_id=int(course_id),
+        )
+    except PathPickRemovalForbidden as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": exc.reason,
+                "message": str(exc),
+                "course_id": exc.course_id,
+            },
+        ) from exc
+    except PathPickNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# AI Agent Intake — the wizard that builds a student's learning path
+# --------------------------------------------------------------------------- #
+#
+# These endpoints back the "Build my learning path" agent. The flow is:
+#
+#   1.  POST /intake/start      -> open a session, return the first question
+#   2.  POST /intake/{sid}/answer -> submit one answer, get the next question
+#                                    (or a preview when all questions are
+#                                    answered)
+#   3a. POST /intake/{sid}/confirm -> persist the preview to learning_paths
+#   3b. DELETE /intake/{sid}        -> cancel without saving
+#
+# Until the student calls *confirm* nothing is written to the active
+# learning_paths collection. See ``path_intake_service`` for the state
+# machine + question bank.
+
+
+@router.post(
+    "/student/learning-path/intake/start",
+    response_model=IntakeSessionApi,
+    status_code=201,
+)
+async def start_learning_path_intake(request: Request):
+    """Open a fresh intake session and return the first question."""
+    student_id = _require_student(request)
+    session = await path_intake_service.start_intake(user_id=student_id)
+    return _intake_session_to_api(session)
+
+
+@router.post(
+    "/student/learning-path/intake/{session_id}/answer",
+    response_model=IntakeSessionApi,
+)
+async def submit_learning_path_intake_answer(
+    session_id: str,
+    body: IntakeAnswerRequest,
+    request: Request,
+):
+    """Submit a single answer and advance the wizard.
+
+    Returns the updated session — when the last question is answered the
+    response will also include ``preview`` and ``preview_header`` so the
+    UI can immediately render the confirmation screen.
+    """
+    student_id = _require_student(request)
+    try:
+        session = await path_intake_service.submit_answer(
+            user_id=student_id,
+            session_id=session_id,
+            question_id=body.question_id,
+            selected=body.selected,
+        )
+    except IntakeNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except IntakeInvalidAnswer as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except IntakeAlreadyConfirmed as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _intake_session_to_api(session)
+
+
+@router.get(
+    "/student/learning-path/intake/{session_id}",
+    response_model=IntakeSessionApi,
+)
+async def get_learning_path_intake(session_id: str, request: Request):
+    """Re-read the latest state of an intake session (e.g. after a refresh)."""
+    student_id = _require_student(request)
+    try:
+        session = await path_intake_service.get_session(
+            user_id=student_id, session_id=session_id
+        )
+    except IntakeNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _intake_session_to_api(session)
+
+
+@router.post(
+    "/student/learning-path/intake/{session_id}/confirm",
+    response_model=SavedLearningPathApi,
+)
+async def confirm_learning_path_intake(session_id: str, request: Request):
+    """Persist the preview to ``learning_paths`` and mark the intake confirmed.
+
+    Archives any previously-active path for the student so we never have
+    two simultaneously active rows.
+    """
+    student_id = _require_student(request)
+    try:
+        saved = await path_intake_service.confirm_intake(
+            user_id=student_id, session_id=session_id
+        )
+    except IntakeNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except IntakeAlreadyConfirmed as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _saved_path_to_api(saved)
+
+
+@router.delete(
+    "/student/learning-path/intake/{session_id}",
+    status_code=204,
+)
+async def cancel_learning_path_intake(session_id: str, request: Request):
+    """Mark an in-flight intake as cancelled.
+
+    Cancelled sessions are not deleted immediately — the TTL index reaps
+    them within 24h. This keeps the conversation analytics intact ("how
+    many students start but don't finish the wizard").
+    """
+    student_id = _require_student(request)
+    try:
+        await path_intake_service.cancel_intake(
+            user_id=student_id, session_id=session_id
+        )
+    except IntakeNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return None
 
 
 @router.get("/{student_id}/learning-path", response_model=LearningPathResponse)

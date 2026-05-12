@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """Honest evaluation for the dropout / risk RF — stricter splits + baselines.
 
-Time-split still lets the *same student* appear in train and test on different weeks, so the
-model can partly memorize user-level habits. **group_user** holdout puts entire users in test
-only — metrics usually drop; that is a more realistic generalization check.
+``group_user`` holdout puts whole users in test only; this is stricter
+than a time split (which still lets the same student appear in train
+and test on different weeks). Also runs dummy baselines (majority +
+stratified) and a label-shuffle sanity check on the same split.
 
-Usage (from BE/, venv on):
+Usage::
 
-  python -m ml.training.evaluate_dropout_model --since-weeks 20 --label-mode persona_binary --split group_user
-  python -m ml.training.evaluate_dropout_model --since-weeks 20 --label-mode composite --split group_user
-
-Also runs **dummy baselines** on the same split (majority class, stratified random).
+    python -m ml.training.evaluate_dropout_model --since-weeks 20 --label-mode persona_binary --split group_user
 """
 
 from __future__ import annotations

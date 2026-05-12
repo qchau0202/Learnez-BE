@@ -11,3 +11,8 @@ venv/
 
 # local terminal logs / temp scripts
 *.log
+
+# Curriculum crawler artifacts — regenerated on every run, never reviewed.
+ml/data/syllabi.json
+ml/data/syllabi.smoke.json
+debug.html

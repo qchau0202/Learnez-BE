@@ -8,7 +8,7 @@
   "runs": [
     {
       "label_mode": "composite",
-      "model_path": "/Users/chou/Study/TDTU/DA-CNTT/523k0002_523k0021/source_code/Source/BE/ml/models/dropout_rf_composite.joblib",
+      "model_path": "/Users/chou/Study/TDTU/DA-CNTT/DuongHuuPhuoc_523k0002_523k0021/source_code/Source/BE/ml/models/dropout_rf_composite.joblib",
       "status": "ok",
       "data_source": "REAL_MONGO",
       "started_at_utc": "2026-05-04T07:34:36.879904+00:00",

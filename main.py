@@ -35,6 +35,14 @@ if not _cors_origins:
         "http://127.0.0.1:5173",
     ]
 
+# Also accept any *.learnez.online subdomain (apex + www + future previews)
+# without needing to remember to update the CORS_ORIGINS list.
+# Override the regex via CORS_ORIGIN_REGEX if you ever change the domain.
+_cors_origin_regex = (
+    os.getenv("CORS_ORIGIN_REGEX")
+    or r"https://([a-z0-9-]+\.)*learnez\.online"
+)
+
 app = FastAPI(
     title="Learnez Backend API",
     description=(
@@ -50,6 +58,7 @@ app.add_middleware(AuthMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
+    allow_origin_regex=_cors_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

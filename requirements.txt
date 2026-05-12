@@ -22,3 +22,10 @@ redis
 
 # Media/file storage
 cloudinary
+
+# Curriculum crawling (ml.data.curriculum.crawler) — parses the TDTU syllabus
+# pages. httpx is already a transitive dep of FastAPI / Supabase, pinned here
+# to make the crawler's direct dependency explicit.
+beautifulsoup4
+lxml
+httpx
